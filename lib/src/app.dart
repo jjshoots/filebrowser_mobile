@@ -5,6 +5,7 @@ import 'auth/auth_controller.dart';
 import 'transfers/transfer_service.dart';
 import 'ui/browser_screen.dart';
 import 'ui/login_screen.dart';
+import 'ui/webview_login_screen.dart';
 
 class FileBrowserApp extends StatelessWidget {
   const FileBrowserApp({super.key});
@@ -42,12 +43,16 @@ class _AuthGate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final stage = context.watch<AuthController>().stage;
-    switch (stage) {
+    final auth = context.watch<AuthController>();
+    switch (auth.stage) {
       case AuthStage.needsSetup:
         return const LoginScreen();
       case AuthStage.locked:
         return const LockScreen();
+      case AuthStage.needsLogin:
+        final target = auth.loginTarget;
+        if (target == null) return const LockScreen();
+        return WebViewLoginScreen(target: target);
       case AuthStage.authenticated:
         return const BrowserScreen();
       case AuthStage.busy:

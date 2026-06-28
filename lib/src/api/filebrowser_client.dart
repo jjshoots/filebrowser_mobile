@@ -32,9 +32,31 @@ class FileBrowserClient {
   String? _token;
   bool _renewPending = false;
 
+  /// Called whenever the token changes (initial adoption or renewal) so the
+  /// caller can persist it. Captcha-protected servers can't silently re-login,
+  /// so keeping the cached JWT fresh via renew matters.
+  void Function(String token)? onTokenChanged;
+
   String get baseUrl => _baseUrl;
   String? get token => _token;
   bool get isAuthenticated => _token != null;
+
+  /// Adopt a JWT obtained out-of-band (e.g. harvested from the WebView login).
+  void adoptToken(String token) {
+    _token = token.trim();
+    _renewPending = false;
+  }
+
+  /// Decode the `user` claim from a JWT (same shape as the login response).
+  static FbUser userFromToken(String jwt) => _decodeUser(jwt);
+
+  /// Whether [jwt] is well-formed and not within [margin] of expiring.
+  static bool isTokenValid(String jwt,
+      {Duration margin = const Duration(minutes: 1)}) {
+    final exp = _tokenExpiry(jwt);
+    if (exp == null) return false;
+    return exp.isAfter(DateTime.now().add(margin));
+  }
 
   static String _normalizeBase(String url) {
     var u = url.trim();
@@ -92,6 +114,7 @@ class FileBrowserClient {
     );
     _token = (resp.data as String).trim();
     _renewPending = false;
+    onTokenChanged?.call(_token!);
   }
 
   /// Lists a directory. [path] is server-relative (`/` is the root scope).
@@ -119,6 +142,31 @@ class FileBrowserClient {
         .replace(queryParameters: {'override': override.toString()});
   }
 
+  /// Thumbnail/preview URL. [size] is 'thumb' or 'big'. Requires [authHeaders].
+  Uri previewUri(String path, {String size = 'thumb'}) =>
+      _api('preview/$size', path);
+
+  /// Raw file URL for in-app viewing/streaming. [inline] sets inline disposition.
+  Uri rawUri(String path, {bool inline = false}) {
+    final uri = _api('raw', path);
+    return inline ? uri.replace(queryParameters: {'inline': 'true'}) : uri;
+  }
+
+  /// Headers for image/video loaders (CachedNetworkImage, VideoPlayer, …).
+  Map<String, String> get authHeaders =>
+      _token == null ? const {} : {'X-Auth': _token!};
+
+  /// Rename/move [fromPath] to [toPath] (both server-relative).
+  Future<void> rename(String fromPath, String toPath) async {
+    await renewIfNeeded();
+    final dst = toPath.split('/').map(Uri.encodeComponent).join('/');
+    final uri = _api('resources', fromPath).replace(queryParameters: {
+      'action': 'rename',
+      'destination': dst.startsWith('/') ? dst : '/$dst',
+    });
+    await _dio.patchUri(uri, options: _authOptions());
+  }
+
   /// Creates a directory (`POST` with a trailing slash, empty body).
   Future<void> makeDirectory(String path) async {
     await renewIfNeeded();
@@ -140,5 +188,20 @@ class FileBrowserClient {
       base64Url.decode(base64Url.normalize(parts[1])),
     );
     return FbUser.fromClaims(jsonDecode(payload) as Map<String, dynamic>);
+  }
+
+  static DateTime? _tokenExpiry(String jwt) {
+    final parts = jwt.split('.');
+    if (parts.length != 3) return null;
+    try {
+      final payload =
+          jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))))
+              as Map<String, dynamic>;
+      final exp = payload['exp'];
+      if (exp is! int) return null;
+      return DateTime.fromMillisecondsSinceEpoch(exp * 1000);
+    } catch (_) {
+      return null;
+    }
   }
 }

@@ -29,7 +29,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _submit() async {
     if (!_form.currentState!.validate()) return;
-    await context.read<AuthController>().setUpAndLogin(
+    await context.read<AuthController>().beginSetup(
           baseUrl: _url.text,
           username: _user.text,
           password: _pass.text,
@@ -103,7 +103,7 @@ class _LoginScreenState extends State<LoginScreen> {
                               width: 20,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
-                          : const Text('Sign in'),
+                          : const Text('Continue'),
                     ),
                   ),
                 ],

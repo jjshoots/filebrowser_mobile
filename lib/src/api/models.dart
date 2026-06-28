@@ -43,6 +43,26 @@ class FbResource {
     );
   }
 
+  static const _imageExts = {
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif', 'tif', 'tiff', 'svg'
+  };
+  static const _videoExts = {
+    'mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', '3gp', 'flv', 'wmv', 'mpeg', 'mpg'
+  };
+
+  String get _ext {
+    final fromField = (extension ?? '').replaceAll('.', '').toLowerCase();
+    if (fromField.isNotEmpty) return fromField;
+    final dot = name.lastIndexOf('.');
+    return dot == -1 ? '' : name.substring(dot + 1).toLowerCase();
+  }
+
+  /// Decided by extension first (reliable in listings), with the server's
+  /// `type` field as a fallback hint.
+  bool get isImage => !isDir && (_imageExts.contains(_ext) || type == 'image');
+  bool get isVideo => !isDir && (_videoExts.contains(_ext) || type == 'video');
+  bool get isViewableMedia => isImage || isVideo;
+
   /// Directories first, then case-insensitive name order — matches the web UI.
   List<FbResource> get sortedItems {
     final sorted = [...items];

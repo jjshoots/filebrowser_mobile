@@ -17,6 +17,7 @@ class SecureStore {
   static const _kBaseUrl = 'fb_base_url';
   static const _kUsername = 'fb_username';
   static const _kPassword = 'fb_password';
+  static const _kJwt = 'fb_jwt';
 
   Future<bool> get hasCredentials async {
     final values = await _storage.readAll();
@@ -42,6 +43,11 @@ class SecureStore {
     if (baseUrl == null || username == null || password == null) return null;
     return (baseUrl: baseUrl, username: username, password: password);
   }
+
+  /// The cached JWT (kept fresh via renew). Null until a login succeeds.
+  Future<void> saveJwt(String jwt) => _storage.write(key: _kJwt, value: jwt);
+  Future<String?> readJwt() => _storage.read(key: _kJwt);
+  Future<void> clearJwt() => _storage.delete(key: _kJwt);
 
   Future<void> clear() => _storage.deleteAll();
 }

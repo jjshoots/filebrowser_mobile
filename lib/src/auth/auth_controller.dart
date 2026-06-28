@@ -6,20 +6,38 @@ import '../api/models.dart';
 import 'secure_store.dart';
 
 enum AuthStage {
-  /// No stored credentials — show the setup/login form.
+  /// No stored credentials — show the setup form (server URL + credentials).
   needsSetup,
 
   /// Credentials exist; waiting for biometric unlock.
   locked,
 
-  /// Biometric passed and a fresh JWT was obtained.
+  /// Unlocked but no valid cached token — show the WebView login so the user
+  /// can solve the captcha. Credentials are pre-filled from secure storage.
+  needsLogin,
+
+  /// A valid JWT is held; the file browser is usable.
   authenticated,
 
-  /// A login/network attempt is in flight.
+  /// A biometric/network step is in flight.
   busy,
 }
 
-/// Orchestrates: stored credentials -> biometric gate -> JWT login.
+/// Login target passed to the WebView screen (pre-fill + base URL).
+class LoginTarget {
+  LoginTarget({required this.baseUrl, required this.username, required this.password});
+  final String baseUrl;
+  final String username;
+  final String password;
+}
+
+/// Orchestrates: stored credentials -> biometric gate -> cached JWT or
+/// WebView captcha login -> authenticated session.
+///
+/// Because the server uses a captcha, we cannot silently re-login: a fresh
+/// token always requires the user to solve the challenge in the WebView. We
+/// therefore cache the JWT and keep it alive via renew (which is captcha-free);
+/// only when it has truly expired do we route back to [AuthStage.needsLogin].
 class AuthController extends ChangeNotifier {
   AuthController({SecureStore? store, LocalAuthentication? localAuth})
       : _store = store ?? SecureStore(),
@@ -40,7 +58,9 @@ class AuthController extends ChangeNotifier {
   FbUser? _user;
   FbUser? get user => _user;
 
-  /// Decide the initial screen based on whether credentials are stored.
+  LoginTarget? _loginTarget;
+  LoginTarget? get loginTarget => _loginTarget;
+
   Future<void> bootstrap() async {
     _setStage(AuthStage.busy);
     _stage =
@@ -48,31 +68,22 @@ class AuthController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// First-run: validate credentials against the server, then persist them.
-  Future<bool> setUpAndLogin({
+  /// First-run: persist the server URL + credentials, then go to the WebView
+  /// login so the user can solve the captcha. No silent network login.
+  Future<void> beginSetup({
     required String baseUrl,
     required String username,
     required String password,
   }) async {
-    _setStage(AuthStage.busy);
-    try {
-      final client = FileBrowserClient(baseUrl: baseUrl);
-      _user = await client.login(username, password);
-      _client = client;
-      await _store.save(
-        baseUrl: client.baseUrl,
-        username: username,
-        password: password,
-      );
-      _setStage(AuthStage.authenticated);
-      return true;
-    } catch (e) {
-      _fail('Login failed: ${_friendly(e)}', AuthStage.needsSetup);
-      return false;
-    }
+    final normalized = FileBrowserClient(baseUrl: baseUrl).baseUrl;
+    await _store.save(baseUrl: normalized, username: username, password: password);
+    await _store.clearJwt();
+    _loginTarget =
+        LoginTarget(baseUrl: normalized, username: username, password: password);
+    _setStage(AuthStage.needsLogin);
   }
 
-  /// Biometric unlock -> read stored credentials -> mint a fresh JWT.
+  /// Biometric unlock -> use a still-valid cached JWT, else route to WebView login.
   Future<bool> unlockWithBiometrics() async {
     _setStage(AuthStage.busy);
     try {
@@ -96,10 +107,20 @@ class AuthController extends ChangeNotifier {
         notifyListeners();
         return false;
       }
-      final client = FileBrowserClient(baseUrl: creds.baseUrl);
-      _user = await client.login(creds.username, creds.password);
-      _client = client;
-      _setStage(AuthStage.authenticated);
+
+      // Reuse a cached token if it's still valid; otherwise the captcha login.
+      final cached = await _store.readJwt();
+      if (cached != null && FileBrowserClient.isTokenValid(cached)) {
+        _adoptClient(creds.baseUrl, cached);
+        _setStage(AuthStage.authenticated);
+        return true;
+      }
+
+      _loginTarget = LoginTarget(
+          baseUrl: creds.baseUrl,
+          username: creds.username,
+          password: creds.password);
+      _setStage(AuthStage.needsLogin);
       return true;
     } catch (e) {
       _fail('Unlock failed: ${_friendly(e)}', AuthStage.locked);
@@ -107,12 +128,46 @@ class AuthController extends ChangeNotifier {
     }
   }
 
+  /// Called by the WebView screen once it harvests a JWT from localStorage.
+  Future<void> completeWebLogin(String jwt) async {
+    final creds = await _store.read();
+    final baseUrl = creds?.baseUrl ?? _loginTarget?.baseUrl;
+    if (baseUrl == null) {
+      _fail('No server configured.', AuthStage.needsSetup);
+      return;
+    }
+    _adoptClient(baseUrl, jwt);
+    await _store.saveJwt(jwt);
+    _loginTarget = null;
+    _setStage(AuthStage.authenticated);
+  }
+
+  /// User cancelled the WebView login.
+  void cancelWebLogin() {
+    _loginTarget = null;
+    _setStage(AuthStage.locked);
+  }
+
   Future<void> signOut({bool forget = false}) async {
-    if (forget) await _store.clear();
+    if (forget) {
+      await _store.clear();
+    } else {
+      await _store.clearJwt();
+    }
     _client = null;
     _user = null;
+    _loginTarget = null;
     _stage = forget ? AuthStage.needsSetup : AuthStage.locked;
     notifyListeners();
+  }
+
+  void _adoptClient(String baseUrl, String jwt) {
+    final client = FileBrowserClient(baseUrl: baseUrl);
+    client.adoptToken(jwt);
+    // Persist renewed tokens so the cached JWT stays fresh between launches.
+    client.onTokenChanged = (t) => _store.saveJwt(t);
+    _client = client;
+    _user = FileBrowserClient.userFromToken(jwt);
   }
 
   void _setStage(AuthStage s) {
@@ -123,8 +178,6 @@ class AuthController extends ChangeNotifier {
 
   void _fail(String message, AuthStage fallback) {
     _error = message;
-    // If we already have a live session, stay in it; otherwise return to the
-    // operation-specific entry screen (setup vs. lock).
     _stage = _client != null ? AuthStage.authenticated : fallback;
     notifyListeners();
   }
