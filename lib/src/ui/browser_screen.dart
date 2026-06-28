@@ -213,6 +213,70 @@ class _BrowserScreenState extends State<BrowserScreen> {
     );
   }
 
+  Future<void> _newFolder() async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New folder'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Folder name'),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty) return;
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final dir = p.posix.join(_path == '/' ? '' : _path, name);
+    final target = dir.startsWith('/') ? dir : '/$dir';
+    try {
+      await _client.makeDirectory(target);
+      _open(_path);
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not create folder: $e')));
+    }
+  }
+
+  Future<void> _showCreateMenu() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.upload_file),
+              title: const Text('Upload files'),
+              subtitle: const Text('Select one or more files'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                _upload();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.create_new_folder_outlined),
+              title: const Text('New folder'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                _newFolder();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // --- build -----------------------------------------------------------------
 
   @override
@@ -270,9 +334,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
         ),
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _upload,
-        tooltip: 'Upload here',
-        child: const Icon(Icons.upload),
+        onPressed: _showCreateMenu,
+        tooltip: 'Create',
+        child: const Icon(Icons.add),
       ),
     );
   }
