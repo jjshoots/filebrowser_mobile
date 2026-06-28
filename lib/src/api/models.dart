@@ -1,5 +1,43 @@
 // Data models mirroring File Browser's `/api/resources` responses.
 
+/// Sort dimensions, mirroring the File Browser web UI's column sorts.
+enum SortKey { name, size, modified }
+
+/// Natural, case-insensitive string comparison: digit runs compare numerically
+/// so `img2` < `img10`. Mirrors the server's `maruel/natural` ordering.
+int naturalCompare(String a, String b) {
+  final x = a.toLowerCase();
+  final y = b.toLowerCase();
+  var i = 0, j = 0;
+  bool isDigit(int c) => c >= 0x30 && c <= 0x39;
+  while (i < x.length && j < y.length) {
+    final cx = x.codeUnitAt(i), cy = y.codeUnitAt(j);
+    if (isDigit(cx) && isDigit(cy)) {
+      var ei = i;
+      while (ei < x.length && isDigit(x.codeUnitAt(ei))) {
+        ei++;
+      }
+      var ej = j;
+      while (ej < y.length && isDigit(y.codeUnitAt(ej))) {
+        ej++;
+      }
+      // Strip leading zeros, then compare by length, then lexically.
+      final nx = x.substring(i, ei).replaceFirst(RegExp(r'^0+'), '');
+      final ny = y.substring(j, ej).replaceFirst(RegExp(r'^0+'), '');
+      if (nx.length != ny.length) return nx.length - ny.length;
+      final c = nx.compareTo(ny);
+      if (c != 0) return c;
+      i = ei;
+      j = ej;
+    } else {
+      if (cx != cy) return cx - cy;
+      i++;
+      j++;
+    }
+  }
+  return (x.length - i) - (y.length - j);
+}
+
 class FbResource {
   FbResource({
     required this.path,
@@ -63,14 +101,32 @@ class FbResource {
   bool get isVideo => !isDir && (_videoExts.contains(_ext) || type == 'video');
   bool get isViewableMedia => isImage || isVideo;
 
-  /// Directories first, then case-insensitive name order — matches the web UI.
-  List<FbResource> get sortedItems {
-    final sorted = [...items];
-    sorted.sort((a, b) {
-      if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+  /// Directories first, then natural case-insensitive name order (matches the
+  /// File Browser web UI default).
+  List<FbResource> get sortedItems => sortedBy(SortKey.name, true);
+
+  /// Returns the items sorted by [key]/[asc]. Folders are always grouped first;
+  /// names use natural ordering (so `img2` precedes `img10`) like the web app.
+  List<FbResource> sortedBy(SortKey key, bool asc) {
+    final list = [...items];
+    list.sort((a, b) {
+      if (a.isDir != b.isDir) return a.isDir ? -1 : 1; // folders first
+      int c;
+      switch (key) {
+        case SortKey.name:
+          c = naturalCompare(a.name, b.name);
+          break;
+        case SortKey.size:
+          c = a.size.compareTo(b.size);
+          break;
+        case SortKey.modified:
+          c = (a.modified ?? '').compareTo(b.modified ?? ''); // ISO8601 sorts lexically
+          break;
+      }
+      if (c == 0) c = naturalCompare(a.name, b.name);
+      return asc ? c : -c;
     });
-    return sorted;
+    return list;
   }
 }
 

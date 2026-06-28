@@ -24,6 +24,40 @@ class BrowserScreen extends StatefulWidget {
 class _BrowserScreenState extends State<BrowserScreen> {
   String _path = '/';
   late Future<FbResource> _listing;
+  SortKey _sortKey = SortKey.name;
+  bool _sortAsc = true;
+
+  void _applySort(SortKey key) {
+    setState(() {
+      if (_sortKey == key) {
+        _sortAsc = !_sortAsc; // re-selecting a key flips direction (like the web headers)
+      } else {
+        _sortKey = key;
+        _sortAsc = true;
+      }
+    });
+  }
+
+  PopupMenuItem<SortKey> _sortMenuItem(SortKey key, String label) {
+    final active = _sortKey == key;
+    return PopupMenuItem<SortKey>(
+      value: key,
+      child: Row(
+        children: [
+          SizedBox(
+            width: 22,
+            child: active
+                ? Icon(_sortAsc ? Icons.arrow_upward : Icons.arrow_downward, size: 18)
+                : null,
+          ),
+          const SizedBox(width: 8),
+          Text(label,
+              style: TextStyle(
+                  fontWeight: active ? FontWeight.bold : FontWeight.normal)),
+        ],
+      ),
+    );
+  }
 
   FileBrowserClient get _client => context.read<AuthController>().client!;
   TransferService get _transfers => context.read<TransferService>();
@@ -289,6 +323,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ? null
             : IconButton(icon: const Icon(Icons.arrow_back), onPressed: _goUp),
         actions: [
+          PopupMenuButton<SortKey>(
+            icon: const Icon(Icons.sort),
+            tooltip: 'Sort',
+            onSelected: _applySort,
+            itemBuilder: (_) => [
+              _sortMenuItem(SortKey.name, 'Name'),
+              _sortMenuItem(SortKey.size, 'Size'),
+              _sortMenuItem(SortKey.modified, 'Date modified'),
+            ],
+          ),
           IconButton(icon: const Icon(Icons.refresh), onPressed: () => _open(_path)),
           PopupMenuButton<String>(
             onSelected: (v) {
@@ -313,7 +357,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
             if (snap.hasError) {
               return _ErrorView(message: snap.error.toString(), onRetry: () => _open(_path));
             }
-            final items = snap.data?.sortedItems ?? const [];
+            final items = snap.data?.sortedBy(_sortKey, _sortAsc) ?? const [];
             if (items.isEmpty) return const _EmptyView();
             return GridView.builder(
               padding: const EdgeInsets.all(4),

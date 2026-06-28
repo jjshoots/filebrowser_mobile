@@ -44,4 +44,40 @@ void main() {
       expect(res.items, isEmpty);
     });
   });
+
+  group('sorting', () {
+    test('naturalCompare orders numbers numerically, case-insensitively', () {
+      final names = ['img10.jpg', 'img2.jpg', 'IMG1.jpg'];
+      names.sort(naturalCompare);
+      expect(names, ['IMG1.jpg', 'img2.jpg', 'img10.jpg']);
+    });
+
+    FbResource dir(String n) =>
+        FbResource(path: '/$n', name: n, size: 0, isDir: true);
+    FbResource file(String n, int size) =>
+        FbResource(path: '/$n', name: n, size: size, isDir: false);
+
+    final listing = FbResource(
+      path: '/',
+      name: '/',
+      size: 0,
+      isDir: true,
+      items: [file('b10.txt', 30), file('b2.txt', 10), dir('Zeta'), dir('alpha')],
+    );
+
+    test('name asc: folders first (natural), then files (natural)', () {
+      final names = listing.sortedBy(SortKey.name, true).map((e) => e.name).toList();
+      expect(names, ['alpha', 'Zeta', 'b2.txt', 'b10.txt']);
+    });
+
+    test('name desc: folders still grouped first, names reversed', () {
+      final names = listing.sortedBy(SortKey.name, false).map((e) => e.name).toList();
+      expect(names, ['Zeta', 'alpha', 'b10.txt', 'b2.txt']);
+    });
+
+    test('size asc sorts files by size (folders first)', () {
+      final names = listing.sortedBy(SortKey.size, true).map((e) => e.name).toList();
+      expect(names.sublist(2), ['b2.txt', 'b10.txt']); // 10 then 30
+    });
+  });
 }
