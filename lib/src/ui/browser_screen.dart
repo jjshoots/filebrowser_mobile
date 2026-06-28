@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -247,6 +249,46 @@ class _BrowserScreenState extends State<BrowserScreen> {
     );
   }
 
+  /// Recursively uploads a picked folder, recreating its subtree under the
+  /// current directory. The server auto-creates parent dirs on upload, so we
+  /// just send each file to its full relative path.
+  ///
+  /// NOTE: on Android 13+ scoped storage, reading a SAF-picked directory via
+  /// dart:io may require all-files-access (MANAGE_EXTERNAL_STORAGE). If listing
+  /// fails with a permission error on a real device, we'll need permission_handler
+  /// or a SAF/content-URI directory walk. Verified path works for app-readable dirs.
+  Future<void> _uploadFolder() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final dirPath = await FilePicker.getDirectoryPath();
+    if (dirPath == null) return;
+    final folderName = p.basename(dirPath);
+    var count = 0;
+    try {
+      await for (final entity
+          in Directory(dirPath).list(recursive: true, followLinks: false)) {
+        if (entity is! File) continue;
+        final rel = p.relative(entity.path, from: dirPath);
+        final remote = p.posix.join(
+            _path == '/' ? '' : _path, folderName, p.split(rel).join('/'));
+        final target = remote.startsWith('/') ? remote : '/$remote';
+        await _transfers.upload(
+          uploadUrl: _client.uploadUri(target),
+          token: _client.token!,
+          localFilePath: entity.path,
+        );
+        count++;
+      }
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Folder upload failed: $e')));
+      return;
+    }
+    messenger.showSnackBar(SnackBar(
+      content: Text(count == 0
+          ? 'No files found in "$folderName"'
+          : 'Uploading $count file(s) from "$folderName"…'),
+    ));
+  }
+
   Future<void> _newFolder() async {
     final controller = TextEditingController();
     final name = await showDialog<String>(
@@ -295,6 +337,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
               onTap: () {
                 Navigator.pop(sheetCtx);
                 _upload();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.drive_folder_upload_outlined),
+              title: const Text('Upload folder'),
+              subtitle: const Text('Uploads the folder and its contents'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                _uploadFolder();
               },
             ),
             ListTile(
