@@ -18,5 +18,9 @@ android/key.properties
 *.keystore
 *.jks
 
+# Secrets — server URL + credentials, never commit
+.env
+*.env
+
 # Misc
 .DS_Store
