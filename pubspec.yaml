@@ -1,0 +1,40 @@
+name: filebrowser_mobile
+description: Android client for File Browser (self-hosted) with biometric login and background transfers.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Networking
+  dio: ^5.7.0
+
+  # Secure credential storage (Android Keystore / EncryptedSharedPreferences)
+  flutter_secure_storage: ^9.2.2
+
+  # Biometric / device-credential authentication
+  local_auth: ^2.3.0
+
+  # Background upload/download with a native foreground service + notifications
+  background_downloader: ^8.5.0
+
+  # Simple state management / DI
+  provider: ^6.1.2
+
+  # File picking for uploads
+  file_picker: ^8.1.2
+
+  path: ^1.9.0
+  path_provider: ^2.1.4
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
