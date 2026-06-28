@@ -58,7 +58,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   Future<void> _upload() async {
     final messenger = ScaffoldMessenger.of(context);
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+    final result = await FilePicker.pickFiles(allowMultiple: true);
     if (result == null) return;
     for (final f in result.files) {
       if (f.path == null) continue;

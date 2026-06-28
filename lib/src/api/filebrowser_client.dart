@@ -44,6 +44,11 @@ class FileBrowserClient {
     return u.endsWith('/') ? u.substring(0, u.length - 1) : u;
   }
 
+  /// Builds `<base>/api/<segment>` exactly (no trailing slash). Used for the
+  /// auth endpoints (login/renew/signup), which gorilla/mux serves without a
+  /// trailing slash — `/api/login/` 404s.
+  Uri _endpoint(String segment) => Uri.parse('$_baseUrl/api/$segment');
+
   /// Builds `<base>/api/<segment>/<url-encoded path>`.
   Uri _api(String segment, [String path = '/']) {
     final encoded = path
@@ -62,7 +67,7 @@ class FileBrowserClient {
   /// Authenticates and stores the JWT in memory. Returns the decoded user.
   Future<FbUser> login(String username, String password) async {
     final resp = await _dio.postUri(
-      _api('login', '/'),
+      _endpoint('login'),
       data: jsonEncode({
         'username': username,
         'password': password,
@@ -82,7 +87,7 @@ class FileBrowserClient {
   Future<void> renewIfNeeded() async {
     if (_token == null || !_renewPending) return;
     final resp = await _dio.postUri(
-      _api('renew', '/'),
+      _endpoint('renew'),
       options: _authOptions(responseType: ResponseType.plain),
     );
     _token = (resp.data as String).trim();

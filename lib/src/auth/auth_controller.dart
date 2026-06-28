@@ -86,7 +86,7 @@ class AuthController extends ChangeNotifier {
           ),
         );
         if (!ok) {
-          _fail('Biometric authentication was cancelled.');
+          _fail('Biometric authentication was cancelled.', AuthStage.locked);
           return false;
         }
       }

@@ -11,7 +11,8 @@ class TransferService {
   static const _group = 'filebrowser';
 
   Future<void> init() async {
-    await FileDownloader().configureNotification(
+    // configureNotification is synchronous and fluent (returns FileDownloader).
+    FileDownloader().configureNotification(
       running: const TaskNotification('Transferring', '{filename}'),
       complete: const TaskNotification('Done', '{filename}'),
       error: const TaskNotification('Failed', '{filename}'),
@@ -46,9 +47,15 @@ class TransferService {
     required String token,
     required String localFilePath,
   }) async {
+    // UploadTask locates the source file via baseDirectory + directory +
+    // filename, so split the absolute path the file picker gave us.
+    final (baseDirectory, directory, filename) =
+        await Task.split(filePath: localFilePath);
     final task = UploadTask(
       url: uploadUrl.toString(),
-      filePath: localFilePath,
+      filename: filename,
+      directory: directory,
+      baseDirectory: baseDirectory,
       httpRequestMethod: 'POST',
       post: 'binary', // raw bytes in the body, as File Browser expects
       headers: {'X-Auth': token},

@@ -1,4 +1,4 @@
-/// Data models mirroring File Browser's `/api/resources` responses.
+// Data models mirroring File Browser's `/api/resources` responses.
 
 class FbResource {
   FbResource({
