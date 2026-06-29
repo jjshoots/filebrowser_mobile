@@ -15,8 +15,11 @@ import 'batch_ops.dart';
 import 'breadcrumbs.dart';
 import 'destination_picker.dart';
 import 'error_display.dart';
+import 'file_details_sheet.dart';
 import 'image_gallery_screen.dart';
+import 'search_screen.dart';
 import 'selection_controller.dart';
+import 'status_screen.dart';
 import 'video_player_screen.dart';
 
 /// Gallery-style browser: a unified grid where folders are tiles and
@@ -137,6 +140,50 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _open(parent == '.' ? '/' : parent);
   }
 
+  // --- search ----------------------------------------------------------------
+
+  /// Opens search scoped to the current directory and dispatches the picked hit
+  /// through the browser's own flows (navigate / view / actions), so all of the
+  /// viewer/action wiring stays in one place. Result paths from the server are
+  /// relative to [_path]; [SearchScreen] resolves them to absolute paths.
+  Future<void> _openSearch() async {
+    final pick = await Navigator.of(context).push<SearchPick>(
+      MaterialPageRoute(
+        builder: (_) => SearchScreen(client: _client, root: _path),
+      ),
+    );
+    if (pick == null || !mounted) return;
+    if (pick.isDir) {
+      _open(pick.path);
+      return;
+    }
+    // A file: fetch its metadata (the resources endpoint returns a file's info),
+    // then route exactly like a grid tap — viewer for media, action sheet else.
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final res = await _client.listDirectory(pick.path);
+      if (!mounted) return;
+      if (res.isImage) {
+        _openImage(res, [res]);
+      } else if (res.isVideo) {
+        _openVideo(res);
+      } else {
+        _showActions(res);
+      }
+    } catch (e) {
+      showErrorSnackBar(messenger, 'Could not open ${p.posix.basename(pick.path)}: $e');
+    }
+  }
+
+  void _openStatus() {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => StatusScreen(
+        client: _client,
+        user: context.read<AuthController>().user,
+      ),
+    ));
+  }
+
   // --- item activation -------------------------------------------------------
   // Single tap/long-press funnels (the M3 selection seam): when selection mode
   // lands, intercept here to toggle selection instead of activating the item.
@@ -151,26 +198,41 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (item.isDir) {
       _open(item.path);
     } else if (item.isImage) {
-      final images = all.where((e) => e.isImage).toList();
-      final index = images.indexWhere((e) => e.path == item.path);
-      Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => ImageGalleryScreen(
-          client: _client,
-          images: images,
-          initialIndex: index < 0 ? 0 : index,
-        ),
-      ));
+      _openImage(item, all);
     } else if (item.isVideo) {
-      Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => VideoPlayerScreen(
-          url: _client.rawUri(item.path, inline: true),
-          headers: _client.authHeaders,
-          title: item.name,
-        ),
-      ));
+      _openVideo(item);
     } else {
       _showActions(item);
     }
+  }
+
+  void _openImage(FbResource item, List<FbResource> all) {
+    final images = all.where((e) => e.isImage).toList();
+    var index = images.indexWhere((e) => e.path == item.path);
+    // When opened from search the image may not be among [all]; show it alone.
+    if (index < 0) {
+      images.insert(0, item);
+      index = 0;
+    }
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ImageGalleryScreen(
+        client: _client,
+        images: images,
+        initialIndex: index,
+      ),
+    ));
+  }
+
+  void _openVideo(FbResource item) {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => VideoPlayerScreen(
+        url: _client.rawUri(item.path, inline: true),
+        headers: _client.authHeaders,
+        title: item.name,
+        resource: item,
+        client: _client,
+      ),
+    ));
   }
 
   void _handleLongPress(FbResource item, List<FbResource> all) {
@@ -222,6 +284,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
               onTap: () {
                 Navigator.pop(sheetCtx);
                 _delete(item);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.info_outline),
+              title: const Text('Details'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                FileDetailsSheet.show(context, resource: item, client: _client);
               },
             ),
           ],
@@ -682,6 +752,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
           ? null
           : IconButton(icon: const Icon(Icons.arrow_back), onPressed: _goUp),
       actions: [
+        IconButton(
+            icon: const Icon(Icons.search),
+            tooltip: 'Search',
+            onPressed: _openSearch),
         PopupMenuButton<SortKey>(
           icon: const Icon(Icons.sort),
           tooltip: 'Sort',
@@ -695,10 +769,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
         IconButton(icon: const Icon(Icons.refresh), onPressed: () => _open(_path)),
         PopupMenuButton<String>(
           onSelected: (v) {
+            if (v == 'status') _openStatus();
             if (v == 'lock') context.read<AuthController>().signOut();
             if (v == 'forget') context.read<AuthController>().signOut(forget: true);
           },
           itemBuilder: (_) => [
+            const PopupMenuItem(value: 'status', child: Text('Status')),
             PopupMenuItem(value: 'lock', child: Text('Lock (${user?.username ?? ''})')),
             const PopupMenuItem(value: 'forget', child: Text('Sign out & forget')),
           ],

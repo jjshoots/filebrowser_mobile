@@ -5,6 +5,7 @@ import 'package:photo_view/photo_view_gallery.dart';
 
 import '../api/filebrowser_client.dart';
 import '../api/models.dart';
+import 'file_details_sheet.dart';
 
 /// Full-screen, swipeable, pinch-to-zoom photo viewer over the images in a
 /// directory. Uses the server's `preview/big` (a transcoded JPEG) so exotic
@@ -54,6 +55,17 @@ class _ImageGalleryScreenState extends State<ImageGalleryScreen> {
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(fontSize: 15),
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.info_outline),
+            tooltip: 'Details',
+            onPressed: () => FileDetailsSheet.show(
+              context,
+              resource: widget.images[_index],
+              client: widget.client,
+            ),
+          ),
+        ],
       ),
       body: PhotoViewGallery.builder(
         pageController: _pageController,

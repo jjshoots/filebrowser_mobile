@@ -2,7 +2,10 @@ import 'package:chewie/chewie.dart';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
+import '../api/filebrowser_client.dart';
+import '../api/models.dart';
 import 'error_display.dart';
+import 'file_details_sheet.dart';
 
 /// Streams a video from the server (Range-enabled `/api/raw`) with native
 /// controls. Auth is passed via the `X-Auth` HTTP header.
@@ -12,11 +15,18 @@ class VideoPlayerScreen extends StatefulWidget {
     required this.url,
     required this.headers,
     required this.title,
+    this.resource,
+    this.client,
   });
 
   final Uri url;
   final Map<String, String> headers;
   final String title;
+
+  /// The file behind this stream; when supplied (together with [client]) an
+  /// "Info" action exposes its [FileDetailsSheet].
+  final FbResource? resource;
+  final FileBrowserClient? client;
 
   @override
   State<VideoPlayerScreen> createState() => _VideoPlayerScreenState();
@@ -72,6 +82,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         title: Text(widget.title, overflow: TextOverflow.ellipsis),
+        actions: [
+          if (widget.resource != null && widget.client != null)
+            IconButton(
+              icon: const Icon(Icons.info_outline),
+              tooltip: 'Details',
+              onPressed: () => FileDetailsSheet.show(
+                context,
+                resource: widget.resource!,
+                client: widget.client!,
+              ),
+            ),
+        ],
       ),
       body: Center(
         child: _error != null
