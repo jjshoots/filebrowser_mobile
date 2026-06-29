@@ -120,6 +120,69 @@ void main() {
     });
   });
 
+  group('FbResource type helpers', () {
+    FbResource file({String name = 'f', String? ext, String? type}) =>
+        FbResource(
+            path: '/$name', name: name, size: 1, isDir: false,
+            extension: ext, type: type);
+
+    test('isAudio by extension and by type field', () {
+      expect(file(name: 'song.mp3').isAudio, isTrue);
+      expect(file(name: 'song.FLAC').isAudio, isTrue); // case-insensitive
+      expect(file(name: 'clip', ext: '.m4a').isAudio, isTrue);
+      expect(file(name: 'voice', type: 'audio').isAudio, isTrue);
+      expect(file(name: 'song.mp3').isPdf, isFalse);
+      expect(file(name: 'song.mp3').isText, isFalse);
+    });
+
+    test('isPdf by extension and by type field', () {
+      expect(file(name: 'doc.pdf').isPdf, isTrue);
+      expect(file(name: 'doc', type: 'pdf').isPdf, isTrue);
+      expect(file(name: 'doc.txt').isPdf, isFalse);
+    });
+
+    test('isText covers common code/markup exts and the type fields', () {
+      expect(file(name: 'readme.md').isText, isTrue);
+      expect(file(name: 'main.dart').isText, isTrue);
+      expect(file(name: 'data.json').isText, isTrue);
+      expect(file(name: 'notes', type: 'text').isText, isTrue);
+      expect(file(name: 'locked', type: 'textImmutable').isText, isTrue);
+      expect(file(name: 'pic.jpg').isText, isFalse);
+    });
+
+    test('directories are never typed as media/openable kinds', () {
+      final dir = FbResource(
+          path: '/d', name: 'd', size: 0, isDir: true, type: 'audio');
+      expect(dir.isAudio, isFalse);
+      expect(dir.isPdf, isFalse);
+      expect(dir.isText, isFalse);
+    });
+  });
+
+  group('FbResource.activation (open-with routing)', () {
+    FbResource res(
+            {required String name, bool isDir = false, String? type}) =>
+        FbResource(
+            path: '/$name', name: name, size: 1, isDir: isDir, type: type);
+
+    test('folders navigate', () {
+      expect(res(name: 'sub', isDir: true).activation,
+          ResourceActivation.openFolder);
+    });
+
+    test('images and videos open the in-app viewer', () {
+      expect(res(name: 'p.png').activation, ResourceActivation.viewImage);
+      expect(res(name: 'm.mp4').activation, ResourceActivation.playVideo);
+    });
+
+    test('pdf/text/audio and unknown types open externally', () {
+      expect(res(name: 'd.pdf').activation, ResourceActivation.openExternally);
+      expect(res(name: 'r.md').activation, ResourceActivation.openExternally);
+      expect(res(name: 's.mp3').activation, ResourceActivation.openExternally);
+      expect(res(name: 'x.bin').activation, ResourceActivation.openExternally);
+    });
+  });
+
   group('FbResource.modifiedAt', () {
     test('parses an ISO-8601 timestamp', () {
       final r = FbResource.fromJson({

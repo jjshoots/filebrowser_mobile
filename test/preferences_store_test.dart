@@ -31,4 +31,34 @@ void main() {
     final store = await PreferencesStore.create();
     expect(store.sortKey, SortKey.name);
   });
+
+  test('download dir is null when never set', () async {
+    SharedPreferences.setMockInitialValues({});
+    final store = await PreferencesStore.create();
+    expect(store.downloadDir, isNull);
+  });
+
+  test('round-trips and survives a reopen for the download dir', () async {
+    SharedPreferences.setMockInitialValues({});
+    final store = await PreferencesStore.create();
+    await store.setDownloadDir('/storage/emulated/0/Download');
+    expect(store.downloadDir, '/storage/emulated/0/Download');
+
+    final reopened = await PreferencesStore.create();
+    expect(reopened.downloadDir, '/storage/emulated/0/Download');
+  });
+
+  test('clearing (null/empty) the download dir reverts to app storage',
+      () async {
+    SharedPreferences.setMockInitialValues({'pref_download_dir': '/some/dir'});
+    final store = await PreferencesStore.create();
+    expect(store.downloadDir, '/some/dir');
+
+    await store.setDownloadDir(null);
+    expect(store.downloadDir, isNull);
+
+    await store.setDownloadDir('/x');
+    await store.setDownloadDir(''); // empty normalises to "not set"
+    expect(store.downloadDir, isNull);
+  });
 }

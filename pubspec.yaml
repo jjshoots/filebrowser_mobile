@@ -34,14 +34,18 @@ dependencies:
   # Simple state management / DI
   provider: ^6.1.2
 
-  # File picking for uploads
+  # File picking for uploads, and SAF directory picking for download targets
   file_picker: ^11.0.0
+
+  # Hand a downloaded file off to a native Android app (PDF/text/audio/…)
+  open_filex: ^4.7.0
 
   # Typed, non-secret UI preferences (sort order, …)
   shared_preferences: ^2.3.0
 
   path: ^1.9.0
   path_provider: ^2.1.4
+  receive_sharing_intent: ^1.9.0
 
 dev_dependencies:
   flutter_lints: ^4.0.0

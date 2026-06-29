@@ -1,15 +1,19 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 
 import '../api/filebrowser_client.dart';
 import '../api/models.dart';
 import '../auth/auth_controller.dart';
 import '../data/preferences_store.dart';
+import '../transfers/transfer_record.dart';
 import '../transfers/transfer_service.dart';
 import 'batch_ops.dart';
 import 'breadcrumbs.dart';
@@ -20,6 +24,8 @@ import 'image_gallery_screen.dart';
 import 'search_screen.dart';
 import 'selection_controller.dart';
 import 'status_screen.dart';
+import 'transfers_screen.dart';
+import 'upload_conflict.dart';
 import 'video_player_screen.dart';
 
 /// Gallery-style browser: a unified grid where folders are tiles and
@@ -57,6 +63,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
   // A choice the user opted to apply to every remaining conflict in one batch
   // ("apply to all"); reset before each move/copy run.
   ConflictChoice? _bulkConflictChoice;
+
+  // Inbound share (SEND / SEND_MULTIPLE) plumbing: a subscription for files
+  // shared while the app is alive, plus a guard so two share events can't drive
+  // overlapping destination pickers/upload runs at once.
+  StreamSubscription<List<SharedMediaFile>>? _shareSub;
+  bool _handlingShare = false;
 
   PreferencesStore get _prefs => context.read<PreferencesStore>();
 
@@ -109,6 +121,24 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _listing = _client.listDirectory(_path);
     // Rebuild the screen chrome (app bar / action bar) when selection changes.
     _selection.addListener(_onSelectionChanged);
+    _initShareIntake();
+  }
+
+  /// Wires inbound share-into-app: the one-shot intent that launched/relaunched
+  /// the app, plus the stream of shares received while it is already running.
+  /// Each batch routes through [_handleSharedFiles]. The app still launches
+  /// normally when there is no share (empty list -> no-op).
+  void _initShareIntake() {
+    ReceiveSharingIntent.instance.getInitialMedia().then((files) {
+      _handleSharedFiles(files);
+      // Consume the initial intent so a later rebuild doesn't replay it.
+      ReceiveSharingIntent.instance.reset();
+      // Swallow plugin-unavailable errors (e.g. in tests / unsupported hosts)
+      // so the browser still launches normally without a share.
+    }).catchError((_) {});
+    _shareSub = ReceiveSharingIntent.instance
+        .getMediaStream()
+        .listen(_handleSharedFiles, onError: (_) {});
   }
 
   void _onSelectionChanged() {
@@ -117,6 +147,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   @override
   void dispose() {
+    _shareSub?.cancel();
     _selection.removeListener(_onSelectionChanged);
     _selection.dispose();
     _scrollController.dispose();
@@ -163,12 +194,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
     try {
       final res = await _client.listDirectory(pick.path);
       if (!mounted) return;
-      if (res.isImage) {
-        _openImage(res, [res]);
-      } else if (res.isVideo) {
-        _openVideo(res);
-      } else {
-        _showActions(res);
+      switch (res.activation) {
+        case ResourceActivation.openFolder: // a file's listing is never a dir
+        case ResourceActivation.openExternally:
+          _showActions(res);
+        case ResourceActivation.viewImage:
+          _openImage(res, [res]);
+        case ResourceActivation.playVideo:
+          _openVideo(res);
       }
     } catch (e) {
       showErrorSnackBar(messenger, 'Could not open ${p.posix.basename(pick.path)}: $e');
@@ -195,14 +228,22 @@ class _BrowserScreenState extends State<BrowserScreen> {
       _selection.toggle(item.path);
       return;
     }
-    if (item.isDir) {
-      _open(item.path);
-    } else if (item.isImage) {
-      _openImage(item, all);
-    } else if (item.isVideo) {
-      _openVideo(item);
-    } else {
-      _showActions(item);
+    // Folders navigate; media opens the in-app viewer. Every other file (pdf,
+    // text, audio, unknown types — [ResourceActivation.openExternally]) routes
+    // to the action sheet, whose primary action is "Open with…" (hand-off to a
+    // native app). The sheet is kept as the tap target for these files because,
+    // unlike media (which host rename/delete/details inside their viewer), a
+    // non-media file has no in-app viewer — so the sheet is the only place those
+    // per-file actions (and Details) remain reachable.
+    switch (item.activation) {
+      case ResourceActivation.openFolder:
+        _open(item.path);
+      case ResourceActivation.viewImage:
+        _openImage(item, all);
+      case ResourceActivation.playVideo:
+        _openVideo(item);
+      case ResourceActivation.openExternally:
+        _showActions(item);
     }
   }
 
@@ -262,6 +303,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
               subtitle: item.isDir ? null : Text(formatBytes(item.size)),
             ),
             const Divider(height: 1),
+            if (!item.isDir)
+              ListTile(
+                leading: const Icon(Icons.open_in_new),
+                title: const Text('Open with…'),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  _openWith(item);
+                },
+              ),
             ListTile(
               leading: const Icon(Icons.download_outlined),
               title: Text(item.isDir ? 'Download as zip' : 'Download'),
@@ -301,14 +351,118 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   Future<void> _download(FbResource item) async {
+    final choice = await _chooseSaveLocation();
+    if (choice == null || !mounted) return;
     final messenger = ScaffoldMessenger.of(context);
+    final token = await _freshToken();
+    if (token == null) {
+      showErrorSnackBar(messenger, 'Cannot download: session expired. Sign in again.');
+      return;
+    }
     final url = _client.rawDownloadUri(item.path, algo: item.isDir ? 'zip' : null);
     await _transfers.download(
       downloadUrl: url,
-      token: _client.token!,
+      token: token,
       filename: item.isDir ? '${item.name}.zip' : item.name,
+      directory: choice.directory,
     );
     messenger.showSnackBar(SnackBar(content: Text('Downloading ${item.name}…')));
+  }
+
+  /// Downloads [item] to the app cache and hands it to a native Android app via
+  /// open-with (product item 12). A no-app-available result — or any other
+  /// failure — is surfaced as a copyable snackbar.
+  Future<void> _openWith(FbResource item) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final token = await _freshToken();
+    if (token == null) {
+      showErrorSnackBar(messenger, 'Cannot open: session expired. Sign in again.');
+      return;
+    }
+    messenger.showSnackBar(SnackBar(content: Text('Opening ${item.name}…')));
+    try {
+      final path = await _transfers.downloadToCache(
+        downloadUrl: _client.rawDownloadUri(item.path),
+        token: token,
+        filename: item.name,
+      );
+      final result = await OpenFilex.open(path);
+      if (result.type == ResultType.done || !mounted) return;
+      showErrorSnackBar(
+        messenger,
+        result.type == ResultType.noAppToOpen
+            ? 'No app installed can open ${item.name}.'
+            : 'Could not open ${item.name}: ${result.message}',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      showErrorSnackBar(messenger, 'Could not open ${item.name}: $e');
+    }
+  }
+
+  /// Asks where to save a download (product item 13). Shows the remembered
+  /// folder — or "App storage" when none is set — and a "Change folder…" button
+  /// that opens the SAF directory picker. A newly picked folder is held in local
+  /// dialog state only and persisted as the new default when the user confirms
+  /// with Download — tapping Cancel leaves the saved default untouched. Returns
+  /// the chosen absolute directory (a null `directory` means the app's private
+  /// storage), or null overall when the user cancels.
+  Future<({String? directory})?> _chooseSaveLocation() async {
+    final prefs = _prefs;
+    var dir = prefs.downloadDir;
+    return showDialog<({String? directory})>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Save download to'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(dir ?? 'App storage (default)',
+                  style: const TextStyle(fontWeight: FontWeight.w500)),
+              const SizedBox(height: 12),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  icon: const Icon(Icons.folder_open),
+                  label: const Text('Change folder…'),
+                  onPressed: () async {
+                    final chosen = await FilePicker.getDirectoryPath();
+                    if (chosen == null) return;
+                    setLocal(() => dir = chosen);
+                  },
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () async {
+                  // Persist the (possibly changed) folder only on confirm.
+                  if (dir != prefs.downloadDir) await prefs.setDownloadDir(dir);
+                  if (ctx.mounted) Navigator.pop(ctx, (directory: dir));
+                },
+                child: const Text('Download')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Lets the user pick/change the default download save-location from the
+  /// overflow menu, persisting it in [PreferencesStore.downloadDir].
+  Future<void> _setDownloadFolder() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final prefs = _prefs;
+    final chosen = await FilePicker.getDirectoryPath();
+    if (chosen == null) return;
+    await prefs.setDownloadDir(chosen);
+    messenger.showSnackBar(
+        SnackBar(content: Text('Downloads will save to $chosen')));
   }
 
   Future<void> _rename(FbResource item) async {
@@ -439,13 +593,21 @@ class _BrowserScreenState extends State<BrowserScreen> {
       return;
     }
     final names = items.map((e) => e.name).toList();
+    final choice = await _chooseSaveLocation();
+    if (choice == null || !mounted) return;
+    final token = await _freshToken();
+    if (token == null) {
+      showErrorSnackBar(messenger, 'Cannot download: session expired. Sign in again.');
+      return;
+    }
     final url = _client.rawBundleDownloadUri(_path, names, algo: 'zip');
     final base = _path == '/' ? 'files' : p.posix.basename(_path);
     _selection.exit();
     await _transfers.download(
       downloadUrl: url,
-      token: _client.token!,
+      token: token,
       filename: '$base.zip',
+      directory: choice.directory,
     );
     messenger.showSnackBar(
         SnackBar(content: Text('Downloading ${names.length} item(s) as zip…')));
@@ -548,27 +710,20 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   Future<void> _upload() async {
-    final messenger = ScaffoldMessenger.of(context);
     final result = await FilePicker.pickFiles(allowMultiple: true);
-    if (result == null) return;
-    for (final f in result.files) {
-      if (f.path == null) continue;
-      final dest = p.posix.join(_path == '/' ? '' : _path, f.name);
-      final target = dest.startsWith('/') ? dest : '/$dest';
-      await _transfers.upload(
-        uploadUrl: _client.uploadUri(target),
-        token: _client.token!,
-        localFilePath: f.path!,
-      );
-    }
-    messenger.showSnackBar(
-      SnackBar(content: Text('Uploading ${result.files.length} file(s)…')),
-    );
+    if (result == null || !mounted) return;
+    final pending = [
+      for (final f in result.files)
+        if (f.path != null) (localPath: f.path!, name: f.name),
+    ];
+    await _uploadFilesToDir(pending, _path);
   }
 
   /// Recursively uploads a picked folder, recreating its subtree under the
   /// current directory. The server auto-creates parent dirs on upload, so we
-  /// just send each file to its full relative path.
+  /// just send each file to its full relative path. The whole folder is one
+  /// conflict unit: if a folder of the same name already exists the user is
+  /// prompted once (overwrite / skip / keep-both renames the top folder).
   ///
   /// NOTE: on Android 13+ scoped storage, reading a SAF-picked directory via
   /// dart:io may require all-files-access (MANAGE_EXTERNAL_STORAGE). If listing
@@ -577,8 +732,31 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Future<void> _uploadFolder() async {
     final messenger = ScaffoldMessenger.of(context);
     final dirPath = await FilePicker.getDirectoryPath();
-    if (dirPath == null) return;
+    if (dirPath == null || !mounted) return;
     final folderName = p.basename(dirPath);
+
+    // Resolve a clash on the destination folder name before walking it.
+    final existing = _visibleItems.map((e) => e.name).toSet();
+    var effectiveFolder = folderName;
+    var override = false;
+    if (existing.contains(folderName)) {
+      final decision = await _promptUploadConflict(folderName);
+      if (decision == null || !mounted) return;
+      switch (decision.choice) {
+        case ConflictChoice.skip:
+          return;
+        case ConflictChoice.overwrite:
+          override = true;
+        case ConflictChoice.keepBoth:
+          effectiveFolder = dedupedUploadName(existing, folderName);
+      }
+    }
+
+    final token = await _freshToken();
+    if (token == null) {
+      showErrorSnackBar(messenger, 'Cannot upload: session expired. Sign in again.');
+      return;
+    }
     var count = 0;
     try {
       await for (final entity
@@ -586,11 +764,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
         if (entity is! File) continue;
         final rel = p.relative(entity.path, from: dirPath);
         final remote = p.posix.join(
-            _path == '/' ? '' : _path, folderName, p.split(rel).join('/'));
+            _path == '/' ? '' : _path, effectiveFolder, p.split(rel).join('/'));
         final target = remote.startsWith('/') ? remote : '/$remote';
         await _transfers.upload(
-          uploadUrl: _client.uploadUri(target),
-          token: _client.token!,
+          uploadUrl: _client.uploadUri(target, override: override),
+          token: token,
           localFilePath: entity.path,
         );
         count++;
@@ -599,11 +777,188 @@ class _BrowserScreenState extends State<BrowserScreen> {
       showErrorSnackBar(messenger, 'Folder upload failed: $e');
       return;
     }
+    if (!mounted) return;
     messenger.showSnackBar(SnackBar(
       content: Text(count == 0
           ? 'No files found in "$folderName"'
-          : 'Uploading $count file(s) from "$folderName"…'),
+          : 'Uploading $count file(s) from "$effectiveFolder"…'),
     ));
+  }
+
+  /// Refreshes the session ([AuthController.ensureFreshSession]) so a long
+  /// transfer carries a current token, then returns it (or null if the session
+  /// is gone). Call immediately before enqueuing.
+  Future<String?> _freshToken() async {
+    await context.read<AuthController>().ensureFreshSession();
+    return _client.token;
+  }
+
+  /// Enqueues [files] into [destDir], resolving per-file name clashes against
+  /// the destination's existing entries. On the first conflict the user picks
+  /// overwrite / skip / keep-both (with an "apply to all" toggle for the rest of
+  /// the batch); the concrete action + final name come from the pure
+  /// [resolveUploadConflict]. Keep-both names also dedupe against each other
+  /// within the same batch (the reserved-name [taken] set). Uploads pass
+  /// `override=true` only for an explicit overwrite.
+  Future<void> _uploadFilesToDir(
+      List<({String localPath, String name})> files, String destDir) async {
+    if (files.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+
+    // Snapshot the destination's current names so conflicts can be detected and
+    // keep-both variants generated purely. A listing failure degrades to "no
+    // known names" — uploads then go out with override=false, so the server
+    // (which 409s on an un-overridden clash) still protects existing files.
+    final taken = <String>{};
+    try {
+      final listing = await _client.listDirectory(destDir);
+      taken.addAll(listing.items.map((e) => e.name));
+    } catch (_) {/* best-effort */}
+    if (!mounted) return;
+
+    final token = await _freshToken();
+    if (token == null) {
+      showErrorSnackBar(messenger, 'Cannot upload: session expired. Sign in again.');
+      return;
+    }
+
+    ConflictChoice? bulk;
+    var uploaded = 0, skipped = 0;
+    for (final f in files) {
+      // Determine the policy for this file: no clash needs none; otherwise reuse
+      // the bulk choice or prompt for one.
+      var policy = ConflictChoice.overwrite; // unused when there's no clash
+      if (taken.contains(f.name)) {
+        if (bulk != null) {
+          policy = bulk;
+        } else {
+          final decision = await _promptUploadConflict(f.name);
+          if (decision == null) break; // user cancelled — stop the remainder
+          policy = decision.choice;
+          if (decision.applyAll) bulk = policy;
+        }
+      }
+      final plan = resolveUploadConflict(
+          existingNames: taken, desiredName: f.name, policy: policy);
+      if (plan.action == UploadAction.skip) {
+        skipped++;
+        continue;
+      }
+      // Reserve the chosen name so a later same-named file in this batch clashes
+      // (and dedupes) against it too.
+      taken.add(plan.name);
+      final target = _childPath(destDir, plan.name);
+      await _transfers.upload(
+        uploadUrl: _client.uploadUri(target,
+            override: plan.action == UploadAction.overwrite),
+        token: token,
+        localFilePath: f.localPath,
+      );
+      uploaded++;
+    }
+    if (!mounted) return;
+    final parts = [
+      if (uploaded > 0) 'Uploading $uploaded file(s)…',
+      if (skipped > 0) 'skipped $skipped',
+    ];
+    messenger.showSnackBar(SnackBar(
+        content: Text(parts.isEmpty ? 'Nothing to upload' : parts.join(', '))));
+  }
+
+  /// Joins a child [name] onto a `/`-rooted [dir], yielding an absolute target.
+  String _childPath(String dir, String name) {
+    final joined = p.posix.join(dir == '/' ? '' : dir, name);
+    return joined.startsWith('/') ? joined : '/$joined';
+  }
+
+  /// Prompts for an upload naming clash on [name]: overwrite / skip / keep-both,
+  /// plus an "apply to all remaining" toggle. Returns null if the user cancels
+  /// (which aborts the rest of the batch). Mirrors the move/copy
+  /// [_resolveConflict] dialog.
+  Future<({ConflictChoice choice, bool applyAll})?> _promptUploadConflict(
+      String name) async {
+    var applyAll = false;
+    final choice = await showDialog<ConflictChoice>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Already exists'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('"$name" already exists in the destination.'),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: applyAll,
+                onChanged: (v) => setLocal(() => applyAll = v ?? false),
+                title: const Text('Apply to all remaining'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, ConflictChoice.skip),
+                child: const Text('Skip')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, ConflictChoice.keepBoth),
+                child: const Text('Keep both')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, ConflictChoice.overwrite),
+                child: const Text('Overwrite')),
+          ],
+        ),
+      ),
+    );
+    if (choice == null) return null;
+    return (choice: choice, applyAll: applyAll);
+  }
+
+  /// Handles files shared into the app from another app (SEND / SEND_MULTIPLE).
+  /// Brings up the destination picker, then uploads the file-backed shares
+  /// (images/videos/files; text/url shares are ignored) through the same
+  /// conflict-aware path as a manual upload. Re-entrant guard prevents two
+  /// share events from racing.
+  Future<void> _handleSharedFiles(List<SharedMediaFile> shared) async {
+    final pending = [
+      for (final s in shared)
+        if (s.type != SharedMediaType.text && s.type != SharedMediaType.url)
+          (localPath: s.path, name: p.basename(s.path)),
+    ];
+    if (_handlingShare || !mounted) return;
+    if (pending.isEmpty) {
+      // An empty list is the normal no-share launch; a non-empty share with no
+      // file-backed items (a stray text/link share) gets explicit feedback
+      // rather than the app silently coming forward and doing nothing.
+      if (shared.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Only files can be uploaded')));
+      }
+      return;
+    }
+    _handlingShare = true;
+    try {
+      final dest = await Navigator.of(context).push<String>(
+        MaterialPageRoute(
+          builder: (_) => DestinationPicker(
+            client: _client,
+            title: 'Upload ${pending.length} file(s) to',
+            confirmLabel: 'Upload here',
+            initialPath: _path,
+            canCreate: context.read<AuthController>().user?.canCreate ?? false,
+          ),
+        ),
+      );
+      if (dest == null || !mounted) return;
+      await _uploadFilesToDir(pending, dest);
+      // Refresh if the share landed in the directory currently on screen.
+      if (mounted && dest == _path) _open(_path);
+    } finally {
+      _handlingShare = false;
+    }
   }
 
   Future<void> _newFolder() async {
@@ -756,6 +1111,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
             icon: const Icon(Icons.search),
             tooltip: 'Search',
             onPressed: _openSearch),
+        _transfersAction(context),
         PopupMenuButton<SortKey>(
           icon: const Icon(Icons.sort),
           tooltip: 'Sort',
@@ -770,16 +1126,41 @@ class _BrowserScreenState extends State<BrowserScreen> {
         PopupMenuButton<String>(
           onSelected: (v) {
             if (v == 'status') _openStatus();
+            if (v == 'dlfolder') _setDownloadFolder();
             if (v == 'lock') context.read<AuthController>().signOut();
             if (v == 'forget') context.read<AuthController>().signOut(forget: true);
           },
           itemBuilder: (_) => [
             const PopupMenuItem(value: 'status', child: Text('Status')),
+            const PopupMenuItem(
+                value: 'dlfolder', child: Text('Download folder')),
             PopupMenuItem(value: 'lock', child: Text('Lock (${user?.username ?? ''})')),
             const PopupMenuItem(value: 'forget', child: Text('Sign out & forget')),
           ],
         ),
       ],
+    );
+  }
+
+  /// Transfers app-bar action: an icon that opens [TransfersScreen], badged with
+  /// the live count of in-flight transfers (hidden when zero). The count folds
+  /// the service's broadcast record stream via [activeTransferCount].
+  Widget _transfersAction(BuildContext context) {
+    return StreamBuilder<List<TransferRecord>>(
+      stream: _transfers.records,
+      initialData: _transfers.current,
+      builder: (context, snap) {
+        final count = activeTransferCount(snap.data ?? const []);
+        final button = IconButton(
+          icon: const Icon(Icons.swap_vert),
+          tooltip: 'Transfers',
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const TransfersScreen()),
+          ),
+        );
+        if (count == 0) return button;
+        return Badge(label: Text('$count'), child: button);
+      },
     );
   }
 

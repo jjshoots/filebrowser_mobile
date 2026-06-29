@@ -18,6 +18,7 @@ class PreferencesStore {
 
   static const _kSortKey = 'pref_sort_key';
   static const _kSortAsc = 'pref_sort_asc';
+  static const _kDownloadDir = 'pref_download_dir';
 
   /// Persisted sort column (defaults to [SortKey.name]).
   SortKey get sortKey {
@@ -39,5 +40,24 @@ class PreferencesStore {
   Future<void> setSort(SortKey key, bool ascending) async {
     await _prefs.setString(_kSortKey, key.name);
     await _prefs.setBool(_kSortAsc, ascending);
+  }
+
+  /// The last download save-location the user picked (an absolute device path
+  /// from the SAF directory picker), or null when none has been chosen — in
+  /// which case downloads land in the app's private storage. Empty strings are
+  /// normalised to null so a cleared value behaves like "never set".
+  String? get downloadDir {
+    final v = _prefs.getString(_kDownloadDir);
+    return (v == null || v.isEmpty) ? null : v;
+  }
+
+  /// Persists (or, with a null/empty [dir], clears) the default download
+  /// save-location offered for subsequent downloads.
+  Future<void> setDownloadDir(String? dir) async {
+    if (dir == null || dir.isEmpty) {
+      await _prefs.remove(_kDownloadDir);
+    } else {
+      await _prefs.setString(_kDownloadDir, dir);
+    }
   }
 }

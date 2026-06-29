@@ -3,6 +3,12 @@
 /// Sort dimensions, mirroring the File Browser web UI's column sorts.
 enum SortKey { name, size, modified }
 
+/// How tapping a resource activates it in the browser: navigate into a folder,
+/// open the in-app image/video viewer, or hand a non-media file off to a native
+/// Android app via open-with. Kept widget-free so the routing decision is pure
+/// and unit-testable (see [FbResource.activation]).
+enum ResourceActivation { openFolder, viewImage, playVideo, openExternally }
+
 /// Human-readable byte size, e.g. `512 B`, `1.5 KB`, `2.0 GB`.
 ///
 /// Single source of truth shared by the UI and the disk-usage models; mirrors
@@ -111,6 +117,15 @@ class FbResource {
   static const _videoExts = {
     'mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', '3gp', 'flv', 'wmv', 'mpeg', 'mpg'
   };
+  static const _audioExts = {
+    'mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'oga', 'opus', 'wma', 'aiff', 'alac'
+  };
+  static const _pdfExts = {'pdf'};
+  static const _textExts = {
+    'txt', 'md', 'markdown', 'log', 'json', 'yaml', 'yml', 'xml', 'csv', 'ini',
+    'conf', 'sh', 'dart', 'js', 'ts', 'html', 'htm', 'css', 'c', 'h', 'cpp',
+    'java', 'kt', 'py', 'go', 'rs', 'toml', 'rtf'
+  };
 
   String get _ext {
     final fromField = (extension ?? '').replaceAll('.', '').toLowerCase();
@@ -123,7 +138,23 @@ class FbResource {
   /// `type` field as a fallback hint.
   bool get isImage => !isDir && (_imageExts.contains(_ext) || type == 'image');
   bool get isVideo => !isDir && (_videoExts.contains(_ext) || type == 'video');
+  bool get isAudio => !isDir && (_audioExts.contains(_ext) || type == 'audio');
+  bool get isPdf => !isDir && (_pdfExts.contains(_ext) || type == 'pdf');
+  bool get isText =>
+      !isDir &&
+      (_textExts.contains(_ext) || type == 'text' || type == 'textImmutable');
   bool get isViewableMedia => isImage || isVideo;
+
+  /// How the browser should activate this resource when tapped. Media opens the
+  /// in-app viewer/player; every other file (pdf/text/audio and unknown types)
+  /// is handed to a native app via open-with. Mirrors [_handleTap]'s routing so
+  /// the decision can be unit-tested without the widget tree.
+  ResourceActivation get activation {
+    if (isDir) return ResourceActivation.openFolder;
+    if (isImage) return ResourceActivation.viewImage;
+    if (isVideo) return ResourceActivation.playVideo;
+    return ResourceActivation.openExternally;
+  }
 
   /// Directories first, then natural case-insensitive name order (matches the
   /// File Browser web UI default).

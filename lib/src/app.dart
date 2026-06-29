@@ -20,7 +20,10 @@ class FileBrowserApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         Provider<PreferencesStore>.value(value: prefs),
-        Provider<TransferService>(create: (_) => TransferService()..init()),
+        Provider<TransferService>(
+          create: (_) => TransferService()..init(),
+          dispose: (_, service) => service.dispose(),
+        ),
         ChangeNotifierProvider<AuthController>(
           create: (_) => AuthController()..bootstrap(),
         ),

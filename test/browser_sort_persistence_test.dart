@@ -8,7 +8,9 @@ import 'package:filebrowser_mobile/src/api/filebrowser_client.dart';
 import 'package:filebrowser_mobile/src/api/models.dart';
 import 'package:filebrowser_mobile/src/auth/auth_controller.dart';
 import 'package:filebrowser_mobile/src/data/preferences_store.dart';
+import 'package:filebrowser_mobile/src/transfers/transfer_service.dart';
 import 'package:filebrowser_mobile/src/ui/browser_screen.dart';
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 
 import 'support/mock_adapter.dart';
 
@@ -49,6 +51,9 @@ Widget _harness(PreferencesStore prefs) {
   return MultiProvider(
     providers: [
       Provider<PreferencesStore>.value(value: prefs),
+      // Untracked service (no init() -> no platform channels) just satisfies the
+      // app bar's transfers badge lookup.
+      Provider<TransferService>(create: (_) => TransferService()),
       ChangeNotifierProvider<AuthController>.value(value: auth),
     ],
     child: const MaterialApp(home: BrowserScreen()),
@@ -57,6 +62,12 @@ Widget _harness(PreferencesStore prefs) {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() {
+    // Stub the share plugin so BrowserScreen.initState's intake is inert.
+    ReceiveSharingIntent.setMockValues(
+        initialMedia: const [], mediaStream: const Stream.empty());
+  });
 
   testWidgets('changing sort persists the choice via PreferencesStore',
       (tester) async {
