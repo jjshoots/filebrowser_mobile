@@ -23,6 +23,8 @@ import 'file_details_sheet.dart';
 import 'image_gallery_screen.dart';
 import 'search_screen.dart';
 import 'selection_controller.dart';
+import 'share_dialog.dart';
+import 'shares_screen.dart';
 import 'status_screen.dart';
 import 'transfers_screen.dart';
 import 'upload_conflict.dart';
@@ -217,6 +219,18 @@ class _BrowserScreenState extends State<BrowserScreen> {
     ));
   }
 
+  void _openShares() {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => SharesScreen(client: _client),
+    ));
+  }
+
+  /// Creates a public share link for [item] (single file or folder), surfacing
+  /// the resulting URL in a copyable / shareable dialog. Errors are copyable.
+  Future<void> _shareLink(FbResource item) async {
+    await showCreateShareDialog(context, client: _client, item: item);
+  }
+
   // --- item activation -------------------------------------------------------
   // Single tap/long-press funnels (the M3 selection seam): when selection mode
   // lands, intercept here to toggle selection instead of activating the item.
@@ -318,6 +332,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
               onTap: () {
                 Navigator.pop(sheetCtx);
                 _download(item);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.link),
+              title: const Text('Share link'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                _shareLink(item);
               },
             ),
             ListTile(
@@ -1126,12 +1148,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
         PopupMenuButton<String>(
           onSelected: (v) {
             if (v == 'status') _openStatus();
+            if (v == 'shares') _openShares();
             if (v == 'dlfolder') _setDownloadFolder();
             if (v == 'lock') context.read<AuthController>().signOut();
             if (v == 'forget') context.read<AuthController>().signOut(forget: true);
           },
           itemBuilder: (_) => [
             const PopupMenuItem(value: 'status', child: Text('Status')),
+            const PopupMenuItem(value: 'shares', child: Text('Shared links')),
             const PopupMenuItem(
                 value: 'dlfolder', child: Text('Download folder')),
             PopupMenuItem(value: 'lock', child: Text('Lock (${user?.username ?? ''})')),
@@ -1202,6 +1226,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
         children: [
           _barAction(Icons.download_outlined, 'Download',
               has ? _downloadSelected : null),
+          _barAction(Icons.link, 'Share', single ? _shareSelected : null),
           _barAction(Icons.drive_file_rename_outline, 'Rename',
               single && canModify ? _renameSelected : null),
           _barAction(Icons.drive_file_move_outlined, 'Move',
@@ -1224,6 +1249,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final item = items.single;
     _selection.exit();
     await _rename(item);
+  }
+
+  /// Shares the lone selected item, then leaves selection mode. Reuses the
+  /// per-item [_shareLink] flow so folders/media remain shareable from the bar.
+  Future<void> _shareSelected() async {
+    final items = _selectedResources();
+    if (items.length != 1) return;
+    final item = items.single;
+    _selection.exit();
+    await _shareLink(item);
   }
 
   Widget _barAction(IconData icon, String label, VoidCallback? onPressed) {

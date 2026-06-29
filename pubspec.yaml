@@ -40,6 +40,10 @@ dependencies:
   # Hand a downloaded file off to a native Android app (PDF/text/audio/…)
   open_filex: ^4.7.0
 
+  # System share-sheet for the public share-link URL (text-only, so no
+  # FileProvider / native file-sharing configuration is required).
+  share_plus: ^10.0.0
+
   # Typed, non-secret UI preferences (sort order, …)
   shared_preferences: ^2.3.0
 

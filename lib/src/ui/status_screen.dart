@@ -5,6 +5,7 @@ import '../api/filebrowser_client.dart';
 import '../api/models.dart';
 import '../auth/auth_controller.dart';
 import 'error_display.dart';
+import 'shares_screen.dart';
 
 /// Whether disk-usage figures are meaningful. The server reports `total=0` (and
 /// `used=0`) for non-directory paths, so a zero total means "unavailable" rather
@@ -225,6 +226,14 @@ class _StatusScreenState extends State<StatusScreen> {
     final auth = context.read<AuthController>();
     return Column(
       children: [
+        OutlinedButton.icon(
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => SharesScreen(client: widget.client),
+          )),
+          icon: const Icon(Icons.link),
+          label: const Text('Manage shared links'),
+        ),
+        const SizedBox(height: 8),
         OutlinedButton.icon(
           onPressed: () => auth.signOut(),
           icon: const Icon(Icons.lock_outline),
