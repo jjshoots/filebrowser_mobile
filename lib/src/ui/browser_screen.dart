@@ -123,7 +123,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ListTile(
               leading: Icon(item.isDir ? Icons.folder : Icons.insert_drive_file),
               title: Text(item.name, overflow: TextOverflow.ellipsis),
-              subtitle: item.isDir ? null : Text(_humanSize(item.size)),
+              subtitle: item.isDir ? null : Text(formatBytes(item.size)),
             ),
             const Divider(height: 1),
             ListTile(
@@ -434,18 +434,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
         child: const Icon(Icons.add),
       ),
     );
-  }
-
-  static String _humanSize(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    const units = ['KB', 'MB', 'GB', 'TB'];
-    double size = bytes / 1024;
-    int i = 0;
-    while (size >= 1024 && i < units.length - 1) {
-      size /= 1024;
-      i++;
-    }
-    return '${size.toStringAsFixed(1)} ${units[i]}';
   }
 }
 

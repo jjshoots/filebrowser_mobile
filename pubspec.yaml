@@ -37,6 +37,9 @@ dependencies:
   # File picking for uploads
   file_picker: ^11.0.0
 
+  # Typed, non-secret UI preferences (sort order, …)
+  shared_preferences: ^2.3.0
+
   path: ^1.9.0
   path_provider: ^2.1.4
 

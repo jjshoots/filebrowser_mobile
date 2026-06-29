@@ -161,13 +161,51 @@ class AuthController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// On-demand session freshness check: renews the cached JWT if the server
+  /// asked us to or it is nearing expiry. Call on screen resume and when a
+  /// transfer is enqueued. Renewal is captcha-free; a hard failure is routed
+  /// to [AuthStage.needsLogin] via [onSessionExpired] (no relock, no loop).
+  Future<void> ensureFreshSession() async {
+    final client = _client;
+    if (client == null) return;
+    try {
+      await client.ensureFreshSession();
+    } on SessionExpiredException {
+      // onSessionExpired already routed us to the WebView login.
+    } catch (_) {
+      // Transient network errors keep the current session; the 401 path will
+      // handle a genuinely dead token on the next authenticated request.
+    }
+  }
+
   void _adoptClient(String baseUrl, String jwt) {
     final client = FileBrowserClient(baseUrl: baseUrl);
     client.adoptToken(jwt);
     // Persist renewed tokens so the cached JWT stays fresh between launches.
     client.onTokenChanged = (t) => _store.saveJwt(t);
+    // A dead session (401 + failed renew) routes back to the captcha login.
+    client.onSessionExpired = _handleSessionExpired;
     _client = client;
     _user = FileBrowserClient.userFromToken(jwt);
+  }
+
+  /// Routes an irrecoverably expired session back to the WebView login,
+  /// rebuilding [loginTarget] from stored credentials exactly like
+  /// [unlockWithBiometrics] does. We never relock behind biometrics here.
+  Future<void> _handleSessionExpired() async {
+    await _store.clearJwt();
+    final creds = await _store.read();
+    if (creds == null) {
+      _stage = AuthStage.needsSetup;
+      notifyListeners();
+      return;
+    }
+    _loginTarget = LoginTarget(
+      baseUrl: creds.baseUrl,
+      username: creds.username,
+      password: creds.password,
+    );
+    _setStage(AuthStage.needsLogin);
   }
 
   void _setStage(AuthStage s) {
