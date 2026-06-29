@@ -417,31 +417,6 @@ class FbShare {
       );
 }
 
-/// Chunked-upload parameters used to size each upload chunk and bound the
-/// per-chunk retry budget.
-///
-/// The server advertises no chunk config, so these are local defaults (10 MiB
-/// chunks, 5 retries); kept as a model so call sites have a single source.
-class FbTusConfig {
-  const FbTusConfig({this.chunkSize = 10 * 1024 * 1024, this.retryCount = 5});
-
-  /// Bytes per upload chunk (PATCH body size).
-  final int chunkSize;
-
-  /// Number of retries per chunk before giving up.
-  final int retryCount;
-
-  factory FbTusConfig.fromJson(Map<String, dynamic>? json) {
-    if (json == null) return const FbTusConfig();
-    final cs = (json['chunkSize'] as num?)?.toInt();
-    final rc = (json['retryCount'] as num?)?.toInt();
-    return FbTusConfig(
-      chunkSize: (cs == null || cs <= 0) ? 10 * 1024 * 1024 : cs,
-      retryCount: (rc == null || rc < 0) ? 5 : rc,
-    );
-  }
-}
-
 /// Server capabilities/branding, from `GET /api/settings` (admin-only).
 ///
 /// The endpoint returns the whole config tree; only the few fields a mobile
@@ -453,7 +428,6 @@ class FbServerCaps {
     required this.signup,
     required this.createUserDir,
     required this.name,
-    required this.tus,
   });
 
   /// Whether self-service signup is enabled.
@@ -465,8 +439,6 @@ class FbServerCaps {
   /// Branding name shown in the UI (empty when unset).
   final String name;
 
-  final FbTusConfig tus;
-
   factory FbServerCaps.fromJson(Map<String, dynamic> json) {
     final auth = json['auth'] as Map<String, dynamic>?;
     final methods = auth?['methods'] as Map<String, dynamic>?;
@@ -476,7 +448,6 @@ class FbServerCaps {
       signup: (password?['signup'] ?? json['signup'] ?? false) as bool,
       createUserDir: (json['createUserDir'] ?? false) as bool,
       name: (frontend?['name'] ?? json['name'] ?? '') as String,
-      tus: FbTusConfig.fromJson(json['tus'] as Map<String, dynamic>?),
     );
   }
 }

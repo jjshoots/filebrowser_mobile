@@ -502,7 +502,6 @@ class FileBrowserClient {
           signup: false,
           createUserDir: false,
           name: '',
-          tus: const FbTusConfig(),
         );
       }
       rethrow;

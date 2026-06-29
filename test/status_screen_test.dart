@@ -62,13 +62,11 @@ void main() {
               },
             },
             'frontend': {'name': 'My Files'},
-            'tus': {'chunkSize': 1024, 'retryCount': 3},
           })));
       final caps = await tryLoadSettings(client);
       expect(caps, isNotNull);
       expect(caps!.name, 'My Files');
       expect(caps.signup, isTrue);
-      expect(caps.tus.chunkSize, 1024);
     });
   });
 }

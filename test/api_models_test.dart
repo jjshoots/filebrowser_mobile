@@ -150,17 +150,12 @@ void main() {
       });
       expect(caps.signup, isTrue);
       expect(caps.name, 'My Files');
-      // quantum advertises no chunk config, so defaults apply.
-      expect(caps.tus.chunkSize, 10 * 1024 * 1024);
-      expect(caps.tus.retryCount, 5);
     });
 
     test('tolerates flat keys and applies defaults when missing', () {
       final caps = FbServerCaps.fromJson({'signup': false, 'name': ''});
       expect(caps.signup, isFalse);
       expect(caps.name, '');
-      expect(caps.tus.chunkSize, 10 * 1024 * 1024);
-      expect(caps.tus.retryCount, 5);
     });
   });
 

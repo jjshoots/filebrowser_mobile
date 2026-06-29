@@ -197,21 +197,10 @@ class _StatusScreenState extends State<StatusScreen> {
           );
         }
         return Card(
-          child: Column(
-            children: [
-              ListTile(
-                leading: const Icon(Icons.dns_outlined),
-                title: Text(caps.name.isEmpty ? 'File Browser' : caps.name),
-                subtitle: Text(
-                    'Signup ${caps.signup ? 'enabled' : 'disabled'}'),
-              ),
-              const Divider(height: 1),
-              ListTile(
-                leading: const Icon(Icons.upload_outlined),
-                title: const Text('Upload chunk size'),
-                subtitle: Text(formatBytes(caps.tus.chunkSize)),
-              ),
-            ],
+          child: ListTile(
+            leading: const Icon(Icons.dns_outlined),
+            title: Text(caps.name.isEmpty ? 'File Browser' : caps.name),
+            subtitle: Text('Signup ${caps.signup ? 'enabled' : 'disabled'}'),
           ),
         );
       },
