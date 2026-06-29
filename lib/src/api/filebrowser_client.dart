@@ -360,13 +360,6 @@ class FileBrowserClient {
     return _asShareList(resp.data);
   }
 
-  /// Shares that target [path] specifically (`GET /api/share/<path>`).
-  Future<List<FbShare>> getShares(String path) async {
-    await renewIfNeeded();
-    final resp = await _dio.getUri(_api('share', path), options: _authOptions());
-    return _asShareList(resp.data);
-  }
-
   /// Create a share for [path] (`POST /api/share/<path>`).
   ///
   /// [expires] is a count and [unit] its granularity (`seconds`/`minutes`/
@@ -446,18 +439,6 @@ class FileBrowserClient {
       if (e.response?.statusCode == 404) return false;
       rethrow;
     }
-  }
-
-  /// tus.io upload-creation URL (`POST /api/tus/<path>`); the server replies
-  /// with a `Location` header that subsequent HEAD/PATCH chunks target.
-  ///
-  /// M5 (resumable uploads) will: POST here with `Upload-Length`, read the
-  /// `Location`, then PATCH chunks of [FbServerCaps.tus].chunkSize with
-  /// `Content-Type: application/offset+octet-stream` + `Upload-Offset`, retrying
-  /// up to [FbServerCaps.tus].retryCount per chunk. All requests carry `X-Auth`.
-  Uri tusUploadUri(String path, {bool override = true}) {
-    return _api('tus', path)
-        .replace(queryParameters: {'override': override.toString()});
   }
 
   static Map<String, dynamic> _asMap(dynamic data) {

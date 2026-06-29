@@ -59,13 +59,6 @@ void main() {
           'https://demo.example.com/api/shares');
     });
 
-    test('getShares encodes the path under /api/share', () async {
-      final (client, adapter) = makeClient((_) => MockAdapter.json([]));
-      await client.getShares('/ünïcode/dir');
-      expect(adapter.requests.last.uri.toString(),
-          contains('/api/share/%C3%BCn%C3%AFcode/dir'));
-    });
-
     test('createShare POSTs JSON body to /api/share/<path>', () async {
       final (client, adapter) = makeClient((_) => MockAdapter.json({
             'hash': 'h',
@@ -137,13 +130,6 @@ void main() {
       // each comma-split entry, a second time). One decode layer is visible
       // here; commas inside a name survive as %2C so the split can't mis-cut.
       expect(uri.queryParameters['files'], 'a%20b.jpg,r%C3%ABp%2Cort.png');
-    });
-
-    test('tusUploadUri builds /api/tus/<path>?override=', () {
-      final (client, _) = makeClient((_) => MockAdapter.text(''));
-      final uri = client.tusUploadUri('/big file.iso');
-      expect(uri.toString(), contains('/api/tus/big%20file.iso'));
-      expect(uri.queryParameters['override'], 'true');
     });
 
     group('PATCH destination (copy/move/rename)', () {
