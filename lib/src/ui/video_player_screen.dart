@@ -2,6 +2,8 @@ import 'package:chewie/chewie.dart';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
+import 'error_display.dart';
+
 /// Streams a video from the server (Range-enabled `/api/raw`) with native
 /// controls. Auth is passed via the `X-Auth` HTTP header.
 class VideoPlayerScreen extends StatefulWidget {
@@ -75,9 +77,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
         child: _error != null
             ? Padding(
                 padding: const EdgeInsets.all(24),
-                child: Text('Could not play video:\n$_error',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.white70)),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('Could not play video:\n$_error',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white70)),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      onPressed: () => copyErrorToClipboard(
+                        'Could not play video:\n$_error',
+                        ScaffoldMessenger.of(context),
+                      ),
+                      icon: const Icon(Icons.copy, size: 18, color: Colors.white70),
+                      label: const Text('Copy',
+                          style: TextStyle(color: Colors.white70)),
+                    ),
+                  ],
+                ),
               )
             : _chewie != null
                 ? Chewie(controller: _chewie!)

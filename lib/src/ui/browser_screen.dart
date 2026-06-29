@@ -9,7 +9,10 @@ import 'package:provider/provider.dart';
 import '../api/filebrowser_client.dart';
 import '../api/models.dart';
 import '../auth/auth_controller.dart';
+import '../data/preferences_store.dart';
 import '../transfers/transfer_service.dart';
+import 'breadcrumbs.dart';
+import 'error_display.dart';
 import 'image_gallery_screen.dart';
 import 'video_player_screen.dart';
 
@@ -26,18 +29,34 @@ class BrowserScreen extends StatefulWidget {
 class _BrowserScreenState extends State<BrowserScreen> {
   String _path = '/';
   late Future<FbResource> _listing;
-  SortKey _sortKey = SortKey.name;
-  bool _sortAsc = true;
+  late SortKey _sortKey;
+  late bool _sortAsc;
 
+  // Retained across rebuilds so the grid's scroll offset survives opening and
+  // closing a media viewer (product item 2) and any incidental rebuild. See the
+  // diagnosis note above [build].
+  final ScrollController _scrollController = ScrollController();
+
+  // --- M3 selection seam -----------------------------------------------------
+  // M3 (multiselect) adds selection state here (e.g. `bool _selectionMode` and a
+  // `Set<String> _selectedPaths`). Tap/long-press already funnel through the
+  // single [_handleTap]/[_handleLongPress] entry points below, so selection mode
+  // can intercept there without touching _ResourceGrid or _GalleryTile.
+
+  PreferencesStore get _prefs => context.read<PreferencesStore>();
+
+  /// Re-selecting the active key flips direction (like the web column headers);
+  /// a new key sorts ascending. Persists the choice so it survives app restart.
   void _applySort(SortKey key) {
     setState(() {
       if (_sortKey == key) {
-        _sortAsc = !_sortAsc; // re-selecting a key flips direction (like the web headers)
+        _sortAsc = !_sortAsc;
       } else {
         _sortKey = key;
         _sortAsc = true;
       }
     });
+    _prefs.setSort(_sortKey, _sortAsc);
   }
 
   PopupMenuItem<SortKey> _sortMenuItem(SortKey key, String label) {
@@ -67,7 +86,18 @@ class _BrowserScreenState extends State<BrowserScreen> {
   @override
   void initState() {
     super.initState();
+    // Seed the sort from the persisted preference so the user's last choice is
+    // applied immediately on launch. context.read is allowed in initState.
+    final sort = _prefs.sort;
+    _sortKey = sort.key;
+    _sortAsc = sort.ascending;
     _listing = _client.listDirectory(_path);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 
   void _open(String path) {
@@ -84,8 +114,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   // --- item activation -------------------------------------------------------
+  // Single tap/long-press funnels (the M3 selection seam): when selection mode
+  // lands, intercept here to toggle selection instead of activating the item.
 
-  void _onTap(FbResource item, List<FbResource> all) {
+  void _handleTap(FbResource item, List<FbResource> all) {
     if (item.isDir) {
       _open(item.path);
     } else if (item.isImage) {
@@ -109,6 +141,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
     } else {
       _showActions(item);
     }
+  }
+
+  // ignore: unused_element_parameter
+  void _handleLongPress(FbResource item, List<FbResource> all) {
+    // M3: long-press is the natural gesture to *enter* selection mode; for now
+    // it opens the per-item action sheet. [all] is threaded through so a future
+    // range/"select all" can act on the visible listing.
+    _showActions(item);
   }
 
   // --- secondary actions -----------------------------------------------------
@@ -197,7 +237,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       await _client.rename(item.path, dest);
       _open(_path);
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Rename failed: $e')));
+      showErrorSnackBar(messenger, 'Rename failed: $e');
     }
   }
 
@@ -226,7 +266,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       await _client.delete(item.path);
       _open(_path);
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+      showErrorSnackBar(messenger, 'Delete failed: $e');
     }
   }
 
@@ -279,7 +319,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
         count++;
       }
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Folder upload failed: $e')));
+      showErrorSnackBar(messenger, 'Folder upload failed: $e');
       return;
     }
     messenger.showSnackBar(SnackBar(
@@ -319,7 +359,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       await _client.makeDirectory(target);
       _open(_path);
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Could not create folder: $e')));
+      showErrorSnackBar(messenger, 'Could not create folder: $e');
     }
   }
 
@@ -364,12 +404,18 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   // --- build -----------------------------------------------------------------
 
+  // Scroll-retention (product item 2): the offset is preserved because (a) the
+  // directory listing Future lives in [_listing] and is only reassigned in
+  // [_open] — plain rebuilds (e.g. returning from a viewer) reuse the resolved
+  // snapshot rather than re-fetching — and (b) the grid uses a retained
+  // [_scrollController] plus a per-path PageStorageKey, so the offset is not
+  // discarded when the widget subtree rebuilds.
   @override
   Widget build(BuildContext context) {
     final user = context.read<AuthController>().user;
     return Scaffold(
       appBar: AppBar(
-        title: Text(_path == '/' ? 'Files' : p.basename(_path)),
+        title: Breadcrumbs(path: _path, onTap: _open),
         leading: _path == '/'
             ? null
             : IconButton(icon: const Icon(Icons.arrow_back), onPressed: _goUp),
@@ -406,24 +452,19 @@ class _BrowserScreenState extends State<BrowserScreen> {
               return const Center(child: CircularProgressIndicator());
             }
             if (snap.hasError) {
-              return _ErrorView(message: snap.error.toString(), onRetry: () => _open(_path));
+              return CopyableErrorView(
+                  message: snap.error.toString(), onRetry: () => _open(_path));
             }
             final items = snap.data?.sortedBy(_sortKey, _sortAsc) ?? const [];
             if (items.isEmpty) return const _EmptyView();
-            return GridView.builder(
-              padding: const EdgeInsets.all(4),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                crossAxisSpacing: 4,
-                mainAxisSpacing: 4,
-              ),
-              itemCount: items.length,
-              itemBuilder: (_, i) => _GalleryTile(
-                item: items[i],
-                client: _client,
-                onTap: () => _onTap(items[i], items),
-                onLongPress: () => _showActions(items[i]),
-              ),
+            return _ResourceGrid(
+              // Keyed by path so each directory retains its own scroll position.
+              key: PageStorageKey<String>(_path),
+              items: items,
+              client: _client,
+              controller: _scrollController,
+              onTap: (item) => _handleTap(item, items),
+              onLongPress: (item) => _handleLongPress(item, items),
             );
           },
         ),
@@ -432,6 +473,53 @@ class _BrowserScreenState extends State<BrowserScreen> {
         onPressed: _showCreateMenu,
         tooltip: 'Create',
         child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+/// The directory listing as a gallery grid.
+///
+/// Extracted from [BrowserScreen] so future milestones can extend it cleanly:
+/// M3 (multiselect) adds a `selectedPaths` set + selection chrome here, and M5
+/// (IO) can surface per-tile transfer progress — all without touching the
+/// screen's navigation/sort/error wiring. Tap and long-press are reported per
+/// item via callbacks; the parent decides what they mean (activate vs. select).
+///
+/// Takes the parent's retained [controller] so scroll offset survives rebuilds
+/// (product item 2).
+class _ResourceGrid extends StatelessWidget {
+  const _ResourceGrid({
+    super.key,
+    required this.items,
+    required this.client,
+    required this.controller,
+    required this.onTap,
+    required this.onLongPress,
+  });
+
+  final List<FbResource> items;
+  final FileBrowserClient client;
+  final ScrollController controller;
+  final ValueChanged<FbResource> onTap;
+  final ValueChanged<FbResource> onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    return GridView.builder(
+      controller: controller,
+      padding: const EdgeInsets.all(4),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        crossAxisSpacing: 4,
+        mainAxisSpacing: 4,
+      ),
+      itemCount: items.length,
+      itemBuilder: (_, i) => _GalleryTile(
+        item: items[i],
+        client: client,
+        onTap: () => onTap(items[i]),
+        onLongPress: () => onLongPress(items[i]),
       ),
     );
   }
@@ -532,24 +620,3 @@ class _EmptyView extends StatelessWidget {
   }
 }
 
-class _ErrorView extends StatelessWidget {
-  const _ErrorView({required this.message, required this.onRetry});
-  final String message;
-  final VoidCallback onRetry;
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      children: [
-        const SizedBox(height: 100),
-        const Center(child: Icon(Icons.error_outline, size: 48)),
-        const SizedBox(height: 12),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Text(message, textAlign: TextAlign.center),
-        ),
-        const SizedBox(height: 16),
-        Center(child: FilledButton(onPressed: onRetry, child: const Text('Retry'))),
-      ],
-    );
-  }
-}

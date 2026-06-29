@@ -2,18 +2,24 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'auth/auth_controller.dart';
+import 'data/preferences_store.dart';
 import 'transfers/transfer_service.dart';
 import 'ui/browser_screen.dart';
 import 'ui/login_screen.dart';
 import 'ui/webview_login_screen.dart';
 
 class FileBrowserApp extends StatelessWidget {
-  const FileBrowserApp({super.key});
+  const FileBrowserApp({super.key, required this.prefs});
+
+  /// Pre-resolved preferences store (see [main]); injected via Provider.value
+  /// since its async creation is awaited during bootstrap, before runApp.
+  final PreferencesStore prefs;
 
   @override
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
+        Provider<PreferencesStore>.value(value: prefs),
         Provider<TransferService>(create: (_) => TransferService()..init()),
         ChangeNotifierProvider<AuthController>(
           create: (_) => AuthController()..bootstrap(),
