@@ -244,6 +244,22 @@ class FileBrowserClient {
     return algo == null ? uri : uri.replace(queryParameters: {'algo': algo});
   }
 
+  /// Archive download URL for several entries that live directly inside
+  /// [dirPath]: `GET /api/raw/<dir>?files=<a,b,…>&algo=zip`.
+  ///
+  /// The server reads the `files` value, splits it on commas, then
+  /// `url.QueryUnescape`s each name a *second* time (see upstream `raw.go`
+  /// `parseQueryFiles`). We therefore pre-encode each [names] entry once and let
+  /// the URI serialise the second layer — symmetric with [_patchDestUri]'s
+  /// double-encoded `destination`. Each name is a single path segment relative
+  /// to [dirPath] (i.e. a child's `name`); folders are zipped recursively.
+  Uri rawBundleDownloadUri(String dirPath, List<String> names,
+      {String algo = 'zip'}) {
+    final files = names.map(Uri.encodeComponent).join(',');
+    return _api('raw', dirPath)
+        .replace(queryParameters: {'files': files, 'algo': algo});
+  }
+
   /// Upload target URL: `POST` here with the file's raw bytes as the body.
   Uri uploadUri(String path, {bool override = true}) {
     return _api('resources', path)

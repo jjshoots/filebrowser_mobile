@@ -11,9 +11,12 @@ import '../api/models.dart';
 import '../auth/auth_controller.dart';
 import '../data/preferences_store.dart';
 import '../transfers/transfer_service.dart';
+import 'batch_ops.dart';
 import 'breadcrumbs.dart';
+import 'destination_picker.dart';
 import 'error_display.dart';
 import 'image_gallery_screen.dart';
+import 'selection_controller.dart';
 import 'video_player_screen.dart';
 
 /// Gallery-style browser: a unified grid where folders are tiles and
@@ -37,11 +40,20 @@ class _BrowserScreenState extends State<BrowserScreen> {
   // diagnosis note above [build].
   final ScrollController _scrollController = ScrollController();
 
-  // --- M3 selection seam -----------------------------------------------------
-  // M3 (multiselect) adds selection state here (e.g. `bool _selectionMode` and a
-  // `Set<String> _selectedPaths`). Tap/long-press already funnel through the
-  // single [_handleTap]/[_handleLongPress] entry points below, so selection mode
-  // can intercept there without touching _ResourceGrid or _GalleryTile.
+  // --- M3 multiselect --------------------------------------------------------
+  // Selection state is factored into [SelectionController] (tracked by path so
+  // it survives re-sorts/rebuilds). Tap/long-press funnel through
+  // [_handleTap]/[_handleLongPress] and intercept when the mode is armed.
+  final SelectionController _selection = SelectionController();
+
+  // The currently displayed (sorted) listing, captured as the listing Future
+  // resolves so the contextual app bar's 'select all' and the batch actions can
+  // reach the items without re-reading the snapshot.
+  List<FbResource> _visibleItems = const [];
+
+  // A choice the user opted to apply to every remaining conflict in one batch
+  // ("apply to all"); reset before each move/copy run.
+  ConflictChoice? _bulkConflictChoice;
 
   PreferencesStore get _prefs => context.read<PreferencesStore>();
 
@@ -92,15 +104,27 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _sortKey = sort.key;
     _sortAsc = sort.ascending;
     _listing = _client.listDirectory(_path);
+    // Rebuild the screen chrome (app bar / action bar) when selection changes.
+    _selection.addListener(_onSelectionChanged);
+  }
+
+  void _onSelectionChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    _selection.removeListener(_onSelectionChanged);
+    _selection.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
   void _open(String path) {
+    // Leaving the directory abandons any in-progress selection (paths are
+    // directory-scoped). A same-path refresh keeps the mode so post-action
+    // cleanup can prune the set itself.
+    if (path != _path) _selection.exit();
     setState(() {
       _path = path;
       _listing = _client.listDirectory(path);
@@ -118,6 +142,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
   // lands, intercept here to toggle selection instead of activating the item.
 
   void _handleTap(FbResource item, List<FbResource> all) {
+    // While selecting, a tap toggles membership — even for folders (navigation
+    // is suspended) — so the user can build a set without leaving the grid.
+    if (_selection.active) {
+      _selection.toggle(item.path);
+      return;
+    }
     if (item.isDir) {
       _open(item.path);
     } else if (item.isImage) {
@@ -143,12 +173,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
     }
   }
 
-  // ignore: unused_element_parameter
   void _handleLongPress(FbResource item, List<FbResource> all) {
-    // M3: long-press is the natural gesture to *enter* selection mode; for now
-    // it opens the per-item action sheet. [all] is threaded through so a future
-    // range/"select all" can act on the visible listing.
-    _showActions(item);
+    // Long-press is the gesture that *enters* multiselect (selecting the item);
+    // once armed it toggles, like the OS gallery. The per-item action sheet
+    // (rename / single download / delete) stays reachable by tapping a generic
+    // file when NOT selecting — see [_handleTap]'s default branch.
+    if (_selection.active) {
+      _selection.toggle(item.path);
+    } else {
+      _selection.enter(item.path);
+    }
   }
 
   // --- secondary actions -----------------------------------------------------
@@ -268,6 +302,179 @@ class _BrowserScreenState extends State<BrowserScreen> {
     } catch (e) {
       showErrorSnackBar(messenger, 'Delete failed: $e');
     }
+  }
+
+  // --- batch (multiselect) actions -------------------------------------------
+
+  /// The selected paths resolved against the visible listing, preserving the
+  /// grid's display order.
+  List<FbResource> _selectedResources() {
+    final sel = _selection.selected;
+    return _visibleItems.where((e) => sel.contains(e.path)).toList();
+  }
+
+  Future<void> _deleteSelected() async {
+    final items = _selectedResources();
+    if (items.isEmpty) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete ${items.length} item(s)?'),
+        content: const Text(
+            'Selected files and folders (with their contents) will be '
+            'permanently deleted. This cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(ctx).colorScheme.error),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final failures = <String>[];
+    for (final item in items) {
+      try {
+        await _client.delete(item.path);
+      } catch (e) {
+        failures.add('${item.name}: $e');
+      }
+    }
+    _selection.exit();
+    _open(_path);
+    if (failures.isNotEmpty) {
+      showErrorSnackBar(
+          messenger, 'Delete failed for ${failures.length} item(s):\n'
+              '${failures.join('\n')}');
+    }
+  }
+
+  /// Downloads the selection as a single server-built zip via the raw multi-file
+  /// endpoint (`?files=…&algo=zip`) — one background task instead of N — which
+  /// also recurses folders for free. A lone file is fetched directly (no zip).
+  Future<void> _downloadSelected() async {
+    final items = _selectedResources();
+    if (items.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (items.length == 1 && !items.first.isDir) {
+      _selection.exit();
+      await _download(items.first);
+      return;
+    }
+    final names = items.map((e) => e.name).toList();
+    final url = _client.rawBundleDownloadUri(_path, names, algo: 'zip');
+    final base = _path == '/' ? 'files' : p.posix.basename(_path);
+    _selection.exit();
+    await _transfers.download(
+      downloadUrl: url,
+      token: _client.token!,
+      filename: '$base.zip',
+    );
+    messenger.showSnackBar(
+        SnackBar(content: Text('Downloading ${names.length} item(s) as zip…')));
+  }
+
+  Future<void> _moveOrCopySelected(TransferOp op) async {
+    final items = _selectedResources();
+    if (items.isEmpty) return;
+    final movingDirs = op == TransferOp.move
+        ? items.where((e) => e.isDir).map((e) => e.path).toSet()
+        : const <String>{};
+    final dest = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => DestinationPicker(
+          client: _client,
+          title: op == TransferOp.move ? 'Move to' : 'Copy to',
+          confirmLabel: op == TransferOp.move ? 'Move here' : 'Copy here',
+          initialPath: _path,
+          canCreate: context.read<AuthController>().user?.canCreate ?? false,
+          movingPaths: movingDirs,
+        ),
+      ),
+    );
+    if (dest == null || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    _bulkConflictChoice = null;
+    final result = await runTransferBatch(
+      client: _client,
+      op: op,
+      items: items,
+      destDir: dest,
+      onConflict: _resolveConflict,
+    );
+    _selection.exit();
+    _open(_path);
+    final verb = op == TransferOp.move ? 'Moved' : 'Copied';
+    if (result.failures.isNotEmpty) {
+      showErrorSnackBar(
+          messenger,
+          '$verb ${result.succeeded}, skipped ${result.skipped}; '
+          '${result.failures.length} failed:\n'
+          '${result.failures.map((f) => '${f.item.name}: ${f.error}').join('\n')}');
+    } else if (result.aborted) {
+      // The user cancelled a mid-batch conflict prompt; the remainder was never
+      // attempted, so spell out that it didn't complete.
+      messenger.showSnackBar(SnackBar(
+          content: Text('Cancelled; $verb ${result.succeeded}, '
+              'skipped ${result.skipped}')));
+    } else {
+      messenger.showSnackBar(SnackBar(
+          content: Text('$verb ${result.succeeded} item(s)'
+              '${result.skipped > 0 ? ', skipped ${result.skipped}' : ''}')));
+    }
+  }
+
+  /// Per-item conflict prompt for move/copy. Offers overwrite / skip / keep-both
+  /// and an "apply to all" toggle that remembers the choice for the rest of the
+  /// batch. Returns null to abort the remainder.
+  Future<ConflictChoice?> _resolveConflict(
+      FbResource item, String targetPath) async {
+    if (_bulkConflictChoice != null) return _bulkConflictChoice;
+    var applyAll = false;
+    final choice = await showDialog<ConflictChoice>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Already exists'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('"${item.name}" already exists in the destination.'),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: applyAll,
+                onChanged: (v) => setLocal(() => applyAll = v ?? false),
+                title: const Text('Apply to all remaining'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, ConflictChoice.skip),
+                child: const Text('Skip')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, ConflictChoice.keepBoth),
+                child: const Text('Keep both')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, ConflictChoice.overwrite),
+                child: const Text('Overwrite')),
+          ],
+        ),
+      ),
+    );
+    if (applyAll && choice != null) _bulkConflictChoice = choice;
+    return choice;
   }
 
   Future<void> _upload() async {
@@ -413,66 +620,170 @@ class _BrowserScreenState extends State<BrowserScreen> {
   @override
   Widget build(BuildContext context) {
     final user = context.read<AuthController>().user;
-    return Scaffold(
-      appBar: AppBar(
-        title: Breadcrumbs(path: _path, onTap: _open),
-        leading: _path == '/'
-            ? null
-            : IconButton(icon: const Icon(Icons.arrow_back), onPressed: _goUp),
-        actions: [
-          PopupMenuButton<SortKey>(
-            icon: const Icon(Icons.sort),
-            tooltip: 'Sort',
-            onSelected: _applySort,
-            itemBuilder: (_) => [
-              _sortMenuItem(SortKey.name, 'Name'),
-              _sortMenuItem(SortKey.size, 'Size'),
-              _sortMenuItem(SortKey.modified, 'Date modified'),
-            ],
-          ),
-          IconButton(icon: const Icon(Icons.refresh), onPressed: () => _open(_path)),
-          PopupMenuButton<String>(
-            onSelected: (v) {
-              if (v == 'lock') context.read<AuthController>().signOut();
-              if (v == 'forget') context.read<AuthController>().signOut(forget: true);
+    final selecting = _selection.active;
+    return PopScope(
+      // While selecting, the system/app back gesture exits selection mode
+      // instead of leaving the screen.
+      canPop: !selecting,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _selection.exit();
+      },
+      child: Scaffold(
+        appBar: selecting
+            ? _selectionAppBar(context)
+            : _browseAppBar(context, user),
+        body: RefreshIndicator(
+          onRefresh: () async => _open(_path),
+          child: FutureBuilder<FbResource>(
+            future: _listing,
+            builder: (context, snap) {
+              if (snap.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (snap.hasError) {
+                return CopyableErrorView(
+                    message: snap.error.toString(), onRetry: () => _open(_path));
+              }
+              final items = snap.data?.sortedBy(_sortKey, _sortAsc) ?? const [];
+              // Cache for the contextual app bar / batch actions (see field).
+              _visibleItems = items;
+              if (items.isEmpty) return const _EmptyView();
+              return _ResourceGrid(
+                // Keyed by path so each directory retains its own scroll position.
+                key: PageStorageKey<String>(_path),
+                items: items,
+                client: _client,
+                controller: _scrollController,
+                selectionActive: selecting,
+                selectedPaths: _selection.selected,
+                onTap: (item) => _handleTap(item, items),
+                onLongPress: (item) => _handleLongPress(item, items),
+              );
             },
-            itemBuilder: (_) => [
-              PopupMenuItem(value: 'lock', child: Text('Lock (${user?.username ?? ''})')),
-              const PopupMenuItem(value: 'forget', child: Text('Sign out & forget')),
-            ],
           ),
+        ),
+        bottomNavigationBar:
+            selecting ? _selectionActionBar(context, user) : null,
+        floatingActionButton: selecting
+            ? null
+            : FloatingActionButton(
+                onPressed: _showCreateMenu,
+                tooltip: 'Create',
+                child: const Icon(Icons.add),
+              ),
+      ),
+    );
+  }
+
+  AppBar _browseAppBar(BuildContext context, FbUser? user) {
+    return AppBar(
+      title: Breadcrumbs(path: _path, onTap: _open),
+      leading: _path == '/'
+          ? null
+          : IconButton(icon: const Icon(Icons.arrow_back), onPressed: _goUp),
+      actions: [
+        PopupMenuButton<SortKey>(
+          icon: const Icon(Icons.sort),
+          tooltip: 'Sort',
+          onSelected: _applySort,
+          itemBuilder: (_) => [
+            _sortMenuItem(SortKey.name, 'Name'),
+            _sortMenuItem(SortKey.size, 'Size'),
+            _sortMenuItem(SortKey.modified, 'Date modified'),
+          ],
+        ),
+        IconButton(icon: const Icon(Icons.refresh), onPressed: () => _open(_path)),
+        PopupMenuButton<String>(
+          onSelected: (v) {
+            if (v == 'lock') context.read<AuthController>().signOut();
+            if (v == 'forget') context.read<AuthController>().signOut(forget: true);
+          },
+          itemBuilder: (_) => [
+            PopupMenuItem(value: 'lock', child: Text('Lock (${user?.username ?? ''})')),
+            const PopupMenuItem(value: 'forget', child: Text('Sign out & forget')),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// Contextual app bar shown in selection mode: count, select-all, clear.
+  AppBar _selectionAppBar(BuildContext context) {
+    final total = _visibleItems.length;
+    final allSelected = total > 0 && _selection.count >= total;
+    return AppBar(
+      leading: IconButton(
+        icon: const Icon(Icons.close),
+        tooltip: 'Exit selection',
+        onPressed: _selection.exit,
+      ),
+      title: Text('${_selection.count} selected'),
+      actions: [
+        IconButton(
+          tooltip: allSelected ? 'Deselect all' : 'Select all',
+          icon: Icon(allSelected ? Icons.deselect : Icons.select_all),
+          onPressed: () => allSelected
+              ? _selection.clear()
+              : _selection.selectAll(_visibleItems.map((e) => e.path)),
+        ),
+      ],
+    );
+  }
+
+  /// Bottom action bar for the current selection. Rename/move/copy/delete are
+  /// gated on modify permission; download is always available. Rename is a
+  /// single-item op (the only way to rename a folder or media file, since their
+  /// tap routes to navigation/viewer rather than the per-item sheet), so it is
+  /// enabled only when exactly one item is selected.
+  Widget _selectionActionBar(BuildContext context, FbUser? user) {
+    final canModify = user?.canModify ?? false;
+    final has = _selection.count > 0;
+    final single = _selection.count == 1;
+    return BottomAppBar(
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          _barAction(Icons.download_outlined, 'Download',
+              has ? _downloadSelected : null),
+          _barAction(Icons.drive_file_rename_outline, 'Rename',
+              single && canModify ? _renameSelected : null),
+          _barAction(Icons.drive_file_move_outlined, 'Move',
+              has && canModify ? () => _moveOrCopySelected(TransferOp.move) : null),
+          _barAction(Icons.copy_outlined, 'Copy',
+              has && canModify ? () => _moveOrCopySelected(TransferOp.copy) : null),
+          _barAction(Icons.delete_outline, 'Delete',
+              has && canModify ? _deleteSelected : null),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () async => _open(_path),
-        child: FutureBuilder<FbResource>(
-          future: _listing,
-          builder: (context, snap) {
-            if (snap.connectionState == ConnectionState.waiting) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            if (snap.hasError) {
-              return CopyableErrorView(
-                  message: snap.error.toString(), onRetry: () => _open(_path));
-            }
-            final items = snap.data?.sortedBy(_sortKey, _sortAsc) ?? const [];
-            if (items.isEmpty) return const _EmptyView();
-            return _ResourceGrid(
-              // Keyed by path so each directory retains its own scroll position.
-              key: PageStorageKey<String>(_path),
-              items: items,
-              client: _client,
-              controller: _scrollController,
-              onTap: (item) => _handleTap(item, items),
-              onLongPress: (item) => _handleLongPress(item, items),
-            );
-          },
+    );
+  }
+
+  /// Renames the lone selected item, then leaves selection mode. Reuses the
+  /// per-item [_rename] flow so folders and media (whose tile tap navigates or
+  /// opens a viewer) remain renameable from the selection bar.
+  Future<void> _renameSelected() async {
+    final items = _selectedResources();
+    if (items.length != 1) return;
+    final item = items.single;
+    _selection.exit();
+    await _rename(item);
+  }
+
+  Widget _barAction(IconData icon, String label, VoidCallback? onPressed) {
+    return Expanded(
+      child: InkWell(
+        onTap: onPressed,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon),
+              const SizedBox(height: 2),
+              Text(label, style: const TextStyle(fontSize: 11)),
+            ],
+          ),
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _showCreateMenu,
-        tooltip: 'Create',
-        child: const Icon(Icons.add),
       ),
     );
   }
@@ -494,6 +805,8 @@ class _ResourceGrid extends StatelessWidget {
     required this.items,
     required this.client,
     required this.controller,
+    required this.selectionActive,
+    required this.selectedPaths,
     required this.onTap,
     required this.onLongPress,
   });
@@ -501,6 +814,8 @@ class _ResourceGrid extends StatelessWidget {
   final List<FbResource> items;
   final FileBrowserClient client;
   final ScrollController controller;
+  final bool selectionActive;
+  final Set<String> selectedPaths;
   final ValueChanged<FbResource> onTap;
   final ValueChanged<FbResource> onLongPress;
 
@@ -518,6 +833,8 @@ class _ResourceGrid extends StatelessWidget {
       itemBuilder: (_, i) => _GalleryTile(
         item: items[i],
         client: client,
+        selectionActive: selectionActive,
+        selected: selectedPaths.contains(items[i].path),
         onTap: () => onTap(items[i]),
         onLongPress: () => onLongPress(items[i]),
       ),
@@ -531,12 +848,16 @@ class _GalleryTile extends StatelessWidget {
   const _GalleryTile({
     required this.item,
     required this.client,
+    required this.selectionActive,
+    required this.selected,
     required this.onTap,
     required this.onLongPress,
   });
 
   final FbResource item;
   final FileBrowserClient client;
+  final bool selectionActive;
+  final bool selected;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
 
@@ -571,10 +892,46 @@ class _GalleryTile extends StatelessWidget {
       content = _labelled(surface, _iconForType(item), item.name);
     }
 
-    return InkWell(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      child: ClipRRect(borderRadius: BorderRadius.circular(6), child: content),
+    final primary = Theme.of(context).colorScheme.primary;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        InkWell(
+          onTap: onTap,
+          onLongPress: onLongPress,
+          child:
+              ClipRRect(borderRadius: BorderRadius.circular(6), child: content),
+        ),
+        // Selected highlight: a translucent wash + border, non-interactive so
+        // taps still reach the InkWell beneath.
+        if (selected)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: primary.withValues(alpha: 0.25),
+                  border: Border.all(color: primary, width: 3),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+              ),
+            ),
+          ),
+        // Checkmark / empty-circle overlay while selecting.
+        if (selectionActive)
+          Positioned(
+            top: 4,
+            right: 4,
+            child: Container(
+              decoration: const BoxDecoration(
+                  color: Colors.white, shape: BoxShape.circle),
+              child: Icon(
+                selected ? Icons.check_circle : Icons.radio_button_unchecked,
+                color: selected ? primary : Colors.grey,
+                size: 22,
+              ),
+            ),
+          ),
+      ],
     );
   }
 

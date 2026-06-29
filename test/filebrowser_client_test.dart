@@ -127,6 +127,18 @@ void main() {
       expect(await client.resourceExists('/missing'), isFalse);
     });
 
+    test('rawBundleDownloadUri lists files under the dir with algo=zip', () {
+      final (client, _) = makeClient((_) => MockAdapter.text(''));
+      final uri = client
+          .rawBundleDownloadUri('/My Photos', ['a b.jpg', 'rëp,ort.png']);
+      expect(uri.path, contains('/api/raw/My%20Photos'));
+      expect(uri.queryParameters['algo'], 'zip');
+      // Names are double-encoded (the server unescapes the `files` value, then
+      // each comma-split entry, a second time). One decode layer is visible
+      // here; commas inside a name survive as %2C so the split can't mis-cut.
+      expect(uri.queryParameters['files'], 'a%20b.jpg,r%C3%ABp%2Cort.png');
+    });
+
     test('tusUploadUri builds /api/tus/<path>?override=', () {
       final (client, _) = makeClient((_) => MockAdapter.text(''));
       final uri = client.tusUploadUri('/big file.iso');
