@@ -141,5 +141,23 @@ void main() {
       expect(searches.length, 1,
           reason: 'submit should fire once; the stale timer must be cancelled');
     });
+
+    testWidgets('a too-short query never hits the server and prompts to keep typing',
+        (tester) async {
+      final adapter = searchAdapter();
+      await pumpScreen(tester, clientFor(adapter));
+
+      await tester.enterText(find.byType(TextField), 'ab');
+      // Let the debounce fully elapse so a search WOULD have fired if allowed.
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpAndSettle();
+
+      final searches = adapter.requests
+          .where((o) => o.uri.path.contains('/search'))
+          .toList();
+      expect(searches, isEmpty,
+          reason: 'quantum rejects <3 char queries; do not fire one');
+      expect(find.textContaining('Keep typing'), findsOneWidget);
+    });
   });
 }

@@ -25,7 +25,7 @@ void main() {
       MaterialApp(
         home: VideoPlayerScreen(
           url: Uri.parse('https://example.com/movie.mp4'),
-          headers: const {'X-Auth': 'token'},
+          headers: const {'Authorization': 'Bearer token'},
           title: 'movie.mp4',
         ),
       ),

@@ -53,24 +53,6 @@ bool isMoveIntoSelfOrDescendant(String srcPath, String destDir) {
   return dest == src || dest.startsWith('$src/');
 }
 
-/// Finds a non-colliding variant of [targetPath] by inserting `(n)` before the
-/// extension, probing the server until a free name is found. Mirrors File
-/// Browser's web "keep both" version-suffix behaviour, but resolved client-side
-/// so we can pass a concrete destination to move/copy.
-Future<String> versionedName(
-    FileBrowserClient client, String targetPath) async {
-  final dir = p.posix.dirname(targetPath);
-  final base = p.posix.basenameWithoutExtension(targetPath);
-  final ext = p.posix.extension(targetPath); // '' or leading-dot, e.g. '.jpg'
-  final prefix = dir == '/' ? '' : dir;
-  var n = 1;
-  while (true) {
-    final candidate = '$prefix/$base($n)$ext';
-    if (!await client.resourceExists(candidate)) return candidate;
-    n++;
-  }
-}
-
 /// Per-item outcome of a batch transfer.
 class BatchItemResult {
   BatchItemResult(this.item, {this.skipped = false, this.error});
@@ -108,12 +90,13 @@ typedef ConflictResolver = Future<ConflictChoice?> Function(
 ///
 /// For each item the target is [destinationPath]; if it already exists
 /// ([FileBrowserClient.resourceExists]) the caller's [onConflict] decides
-/// overwrite / skip / keep-both. Overwrite passes `override=true`; keep-both
-/// retargets to a [versionedName]; skip omits the item. Folder *moves* into
-/// self/descendant are recorded as failures and never sent. Per-item errors are
-/// captured (not thrown) so one bad item doesn't abort the others; returning
-/// `null` from [onConflict] aborts the remainder. The orchestration is kept
-/// here, free of widgets, so it is unit-testable against a mock-adapter client.
+/// overwrite / skip / keep-both. Overwrite just sends (quantum always
+/// overwrites); keep-both passes `keepBoth:true` so the server auto-versions the
+/// destination; skip omits the item. Folder *moves* into self/descendant are
+/// recorded as failures and never sent. Per-item errors are captured (not
+/// thrown) so one bad item doesn't abort the others; returning `null` from
+/// [onConflict] aborts the remainder. The orchestration is kept here, free of
+/// widgets, so it is unit-testable against a mock-adapter client.
 Future<BatchResult> runTransferBatch({
   required FileBrowserClient client,
   required TransferOp op,
@@ -131,8 +114,9 @@ Future<BatchResult> runTransferBatch({
       continue;
     }
 
-    var target = destinationPath(item.path, destDir);
+    final target = destinationPath(item.path, destDir);
     var overwrite = false;
+    var keepBoth = false;
     try {
       if (await client.resourceExists(target)) {
         final choice = await onConflict(item, target);
@@ -142,16 +126,25 @@ Future<BatchResult> runTransferBatch({
             results.add(BatchItemResult(item, skipped: true));
             continue;
           case ConflictChoice.overwrite:
+            // Overwriting a file with itself (copying/moving an item into the
+            // folder it already lives in) is a no-op the server rejects with
+            // "cannot copy a file to itself"; treat it as a skip instead.
+            if (_stripTrailingSlash(item.path) == _stripTrailingSlash(target)) {
+              results.add(BatchItemResult(item, skipped: true));
+              continue;
+            }
             overwrite = true;
           case ConflictChoice.keepBoth:
-            target = await versionedName(client, target);
+            keepBoth = true;
         }
       }
 
       if (op == TransferOp.move) {
-        await client.move(item.path, target, overwrite: overwrite);
+        await client.move(item.path, target,
+            overwrite: overwrite, keepBoth: keepBoth);
       } else {
-        await client.copy(item.path, target, overwrite: overwrite);
+        await client.copy(item.path, target,
+            overwrite: overwrite, keepBoth: keepBoth);
       }
       results.add(BatchItemResult(item));
     } catch (e) {

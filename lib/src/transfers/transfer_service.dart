@@ -26,10 +26,11 @@ String sharedDownloadsSubdir(String absoluteDir) {
 /// Wraps `background_downloader` so uploads/downloads run in a native
 /// foreground service and continue when the app is backgrounded or closed.
 ///
-/// File Browser specifics:
-///  - Download: GET `/api/raw/<path>` with `X-Auth` header.
-///  - Upload:   POST `/api/resources/<path>?override=…` with the raw file
-///              bytes as the body — i.e. a *binary* upload (not multipart).
+/// Server specifics:
+///  - Download: GET `/api/resources/download?source=…&file=…` with the
+///              `Authorization: Bearer` header.
+///  - Upload:   POST `/api/resources?path=…&source=…&override=…` with the raw
+///              file bytes as the body — i.e. a *binary* upload (not multipart).
 ///
 /// Beyond enqueueing, the service folds the package's [TaskUpdate] stream into a
 /// small in-memory map of [TransferRecord]s (keyed by taskId) and re-broadcasts
@@ -141,7 +142,7 @@ class TransferService {
       url: downloadUrl.toString(),
       filename: filename,
       baseDirectory: BaseDirectory.applicationDocuments,
-      headers: {'X-Auth': token},
+      headers: {'Authorization': 'Bearer $token'},
       group: _group,
       updates: Updates.statusAndProgress,
       allowPause: true,
@@ -167,7 +168,7 @@ class TransferService {
     final task = DownloadTask(
       url: downloadUrl.toString(),
       filename: filename,
-      headers: {'X-Auth': token},
+      headers: {'Authorization': 'Bearer $token'},
       baseDirectory: BaseDirectory.temporary,
       group: _openGroup,
       updates: Updates.status,
@@ -197,7 +198,7 @@ class TransferService {
       baseDirectory: baseDirectory,
       httpRequestMethod: 'POST',
       post: 'binary', // raw bytes in the body, as File Browser expects
-      headers: {'X-Auth': token},
+      headers: {'Authorization': 'Bearer $token'},
       group: _group,
       updates: Updates.statusAndProgress,
       retries: 3,
@@ -226,13 +227,13 @@ class TransferService {
   Future<bool> cancel(TransferRecord record) =>
       FileDownloader().cancelTaskWithId(record.id);
 
-  /// Re-enqueue a failed/canceled transfer, refreshing its `X-Auth` header with
+  /// Re-enqueue a failed/canceled transfer, refreshing its auth header with
   /// [token] so a long-idle task carries a current session. The original task
   /// object is reused (its header map is mutable), so its progress notification
   /// and identity are preserved.
   Future<String> retry(TransferRecord record, {required String token}) async {
     final task = record.task;
-    task.headers['X-Auth'] = token;
+    task.headers['Authorization'] = 'Bearer $token';
     await FileDownloader().enqueue(task);
     return task.taskId;
   }

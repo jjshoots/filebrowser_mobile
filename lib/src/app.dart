@@ -6,7 +6,6 @@ import 'data/preferences_store.dart';
 import 'transfers/transfer_service.dart';
 import 'ui/browser_screen.dart';
 import 'ui/login_screen.dart';
-import 'ui/webview_login_screen.dart';
 
 class FileBrowserApp extends StatelessWidget {
   const FileBrowserApp({super.key, required this.prefs});
@@ -25,7 +24,7 @@ class FileBrowserApp extends StatelessWidget {
           dispose: (_, service) => service.dispose(),
         ),
         ChangeNotifierProvider<AuthController>(
-          create: (_) => AuthController()..bootstrap(),
+          create: (_) => AuthController(prefs: prefs)..bootstrap(),
         ),
       ],
       child: MaterialApp(
@@ -58,10 +57,8 @@ class _AuthGate extends StatelessWidget {
         return const LoginScreen();
       case AuthStage.locked:
         return const LockScreen();
-      case AuthStage.needsLogin:
-        final target = auth.loginTarget;
-        if (target == null) return const LockScreen();
-        return WebViewLoginScreen(target: target);
+      case AuthStage.needsSource:
+        return const SourceSelectScreen();
       case AuthStage.authenticated:
         return const BrowserScreen();
       case AuthStage.busy:

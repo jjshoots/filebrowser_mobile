@@ -81,7 +81,8 @@ void main() {
     final req = adapter.requests
         .firstWhere((r) => r.uri.queryParameters.containsKey('checksum'));
     expect(req.uri.queryParameters['checksum'], 'sha256');
-    expect(req.uri.path, contains('/api/resources/docs/report.pdf'));
+    expect(req.uri.path, '/api/resources');
+    expect(req.uri.queryParameters['path'], '/docs/report.pdf');
     expect(req.method, 'GET');
   });
 

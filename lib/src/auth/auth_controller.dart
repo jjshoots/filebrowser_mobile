@@ -3,6 +3,7 @@ import 'package:local_auth/local_auth.dart';
 
 import '../api/filebrowser_client.dart';
 import '../api/models.dart';
+import '../data/preferences_store.dart';
 import 'secure_store.dart';
 
 enum AuthStage {
@@ -12,37 +13,33 @@ enum AuthStage {
   /// Credentials exist; waiting for biometric unlock.
   locked,
 
-  /// Unlocked but no valid cached token — show the WebView login so the user
-  /// can solve the captcha. Credentials are pre-filled from secure storage.
-  needsLogin,
+  /// Logged in, but the server exposes several sources and none is remembered —
+  /// the user must pick one before browsing.
+  needsSource,
 
-  /// A valid JWT is held; the file browser is usable.
+  /// A valid JWT is held and a source is selected; the file browser is usable.
   authenticated,
 
   /// A biometric/network step is in flight.
   busy,
 }
 
-/// Login target passed to the WebView screen (pre-fill + base URL).
-class LoginTarget {
-  LoginTarget({required this.baseUrl, required this.username, required this.password});
-  final String baseUrl;
-  final String username;
-  final String password;
-}
-
-/// Orchestrates: stored credentials -> biometric gate -> cached JWT or
-/// WebView captcha login -> authenticated session.
+/// Orchestrates: stored credentials -> biometric gate -> direct login -> source
+/// selection -> authenticated session.
 ///
-/// Because the server uses a captcha, we cannot silently re-login: a fresh
-/// token always requires the user to solve the challenge in the WebView. We
-/// therefore cache the JWT and keep it alive via renew (which is captcha-free);
-/// only when it has truly expired do we route back to [AuthStage.needsLogin].
+/// Login is a direct `POST /api/auth/login`, so a fresh token can always be
+/// minted from the credentials in secure storage. The JWT is cached and kept
+/// alive via renew; on an unrecoverable session we simply log in again.
 class AuthController extends ChangeNotifier {
-  AuthController({SecureStore? store, LocalAuthentication? localAuth})
-      : _store = store ?? SecureStore(),
+  AuthController({
+    required PreferencesStore prefs,
+    SecureStore? store,
+    LocalAuthentication? localAuth,
+  })  : _prefs = prefs,
+        _store = store ?? SecureStore(),
         _localAuth = localAuth ?? LocalAuthentication();
 
+  final PreferencesStore _prefs;
   final SecureStore _store;
   final LocalAuthentication _localAuth;
 
@@ -58,8 +55,10 @@ class AuthController extends ChangeNotifier {
   FbUser? _user;
   FbUser? get user => _user;
 
-  LoginTarget? _loginTarget;
-  LoginTarget? get loginTarget => _loginTarget;
+  List<String> _availableSources = const [];
+
+  /// Source names offered on the [AuthStage.needsSource] selector.
+  List<String> get availableSources => _availableSources;
 
   Future<void> bootstrap() async {
     _setStage(AuthStage.busy);
@@ -68,22 +67,21 @@ class AuthController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// First-run: persist the server URL + credentials, then go to the WebView
-  /// login so the user can solve the captcha. No silent network login.
+  /// First-run: persist the server URL + credentials, then log in directly.
   Future<void> beginSetup({
     required String baseUrl,
     required String username,
     required String password,
   }) async {
+    _setStage(AuthStage.busy);
     final normalized = FileBrowserClient(baseUrl: baseUrl).baseUrl;
     await _store.save(baseUrl: normalized, username: username, password: password);
     await _store.clearJwt();
-    _loginTarget =
-        LoginTarget(baseUrl: normalized, username: username, password: password);
-    _setStage(AuthStage.needsLogin);
+    await _loginAndSelectSource(normalized, username, password,
+        onFailure: AuthStage.needsSetup);
   }
 
-  /// Biometric unlock -> use a still-valid cached JWT, else route to WebView login.
+  /// Biometric unlock -> reuse a still-valid cached JWT, else log in directly.
   Future<bool> unlockWithBiometrics() async {
     _setStage(AuthStage.busy);
     try {
@@ -108,19 +106,17 @@ class AuthController extends ChangeNotifier {
         return false;
       }
 
-      // Reuse a cached token if it's still valid; otherwise the captcha login.
+      // Reuse a cached token while it is still valid; otherwise log in again.
       final cached = await _store.readJwt();
       if (cached != null && FileBrowserClient.isTokenValid(cached)) {
-        _adoptClient(creds.baseUrl, cached);
-        _setStage(AuthStage.authenticated);
+        _adoptClient(creds.baseUrl, cached, username: creds.username);
+        await _resolveSource(_client!);
         return true;
       }
 
-      _loginTarget = LoginTarget(
-          baseUrl: creds.baseUrl,
-          username: creds.username,
-          password: creds.password);
-      _setStage(AuthStage.needsLogin);
+      await _loginAndSelectSource(
+          creds.baseUrl, creds.username, creds.password,
+          onFailure: AuthStage.locked);
       return true;
     } catch (e) {
       _fail('Unlock failed: ${_friendly(e)}', AuthStage.locked);
@@ -128,70 +124,122 @@ class AuthController extends ChangeNotifier {
     }
   }
 
-  /// Called by the WebView screen once it harvests a JWT from localStorage.
-  Future<void> completeWebLogin(String jwt) async {
-    final creds = await _store.read();
-    final baseUrl = creds?.baseUrl ?? _loginTarget?.baseUrl;
-    if (baseUrl == null) {
-      _fail('No server configured.', AuthStage.needsSetup);
-      return;
-    }
-    _adoptClient(baseUrl, jwt);
-    await _store.saveJwt(jwt);
-    _loginTarget = null;
+  /// Confirms the source the user picked on the [AuthStage.needsSource] selector.
+  Future<void> selectSource(String name) async {
+    _client?.setSource(name);
+    await _prefs.setSourceName(name);
+    _availableSources = const [];
     _setStage(AuthStage.authenticated);
-  }
-
-  /// User cancelled the WebView login.
-  void cancelWebLogin() {
-    _loginTarget = null;
-    _setStage(AuthStage.locked);
   }
 
   Future<void> signOut({bool forget = false}) async {
     if (forget) {
       await _store.clear();
+      await _prefs.setSourceName(null);
     } else {
       await _store.clearJwt();
     }
     _client = null;
     _user = null;
-    _loginTarget = null;
+    _availableSources = const [];
     _stage = forget ? AuthStage.needsSetup : AuthStage.locked;
     notifyListeners();
   }
 
   /// On-demand session freshness check: renews the cached JWT if the server
   /// asked us to or it is nearing expiry. Call on screen resume and when a
-  /// transfer is enqueued. Renewal is captcha-free; a hard failure is routed
-  /// to [AuthStage.needsLogin] via [onSessionExpired] (no relock, no loop).
+  /// transfer is enqueued. A hard failure re-runs the direct login via
+  /// [onSessionExpired] (no relock, no loop).
   Future<void> ensureFreshSession() async {
     final client = _client;
     if (client == null) return;
     try {
       await client.ensureFreshSession();
     } on SessionExpiredException {
-      // onSessionExpired already routed us to the WebView login.
+      // onSessionExpired already re-ran the direct login.
     } catch (_) {
       // Transient network errors keep the current session; the 401 path will
       // handle a genuinely dead token on the next authenticated request.
     }
   }
 
-  void _adoptClient(String baseUrl, String jwt) {
-    final client = FileBrowserClient(baseUrl: baseUrl);
-    client.adoptToken(jwt);
-    // Persist renewed tokens so the cached JWT stays fresh between launches.
-    client.onTokenChanged = (t) => _store.saveJwt(t);
-    // A dead session (401 + failed renew) routes back to the captcha login.
-    client.onSessionExpired = _handleSessionExpired;
-    _client = client;
-    _user = FileBrowserClient.userFromToken(jwt);
+  /// Logs in directly with [username]/[password] against [baseUrl], caches the
+  /// JWT, and resolves the browsing source. Failures land on [onFailure] with a
+  /// human-readable error.
+  Future<void> _loginAndSelectSource(
+    String baseUrl,
+    String username,
+    String password, {
+    required AuthStage onFailure,
+  }) async {
+    try {
+      final client = FileBrowserClient(baseUrl: baseUrl);
+      final user = await client.login(username, password);
+      _wireClient(client);
+      _user = user;
+      await _store.saveJwt(client.token!);
+      await _resolveSource(client);
+    } catch (e) {
+      _fail('Sign in failed: ${_friendly(e)}', onFailure);
+    }
   }
 
-  /// Routes an irrecoverably expired session back to the WebView login,
-  /// rebuilding [loginTarget] from stored credentials exactly like
-  /// [unlockWithBiometrics] does. We never relock behind biometrics here.
+  /// Picks the source [client] will browse: restore a remembered choice, else
+  /// auto-select when there is exactly one, else route to the selector.
+  Future<void> _resolveSource(FileBrowserClient client) async {
+    final saved = _prefs.sourceName;
+    Map<String, FbSource> sources;
+    try {
+      sources = await client.listSources();
+    } catch (_) {
+      // Can't enumerate sources (e.g. permissions): fall back to a remembered
+      // choice if any, then browse — a missing source just yields empty calls.
+      if (saved != null) client.setSource(saved);
+      _setStage(AuthStage.authenticated);
+      return;
+    }
+    if (saved != null && sources.containsKey(saved)) {
+      client.setSource(saved);
+      _setStage(AuthStage.authenticated);
+      return;
+    }
+    if (sources.length == 1) {
+      final name = sources.keys.first;
+      client.setSource(name);
+      await _prefs.setSourceName(name);
+      _setStage(AuthStage.authenticated);
+      return;
+    }
+    if (sources.isEmpty) {
+      _setStage(AuthStage.authenticated);
+      return;
+    }
+    _availableSources = sources.keys.toList();
+    _setStage(AuthStage.needsSource);
+  }
+
+  void _adoptClient(String baseUrl, String jwt, {String username = ''}) {
+    final client = FileBrowserClient(baseUrl: baseUrl);
+    client.adoptToken(jwt);
+    _wireClient(client);
+    final decoded = FileBrowserClient.userFromToken(jwt);
+    _user = FbUser(
+      username: username,
+      canCreate: decoded.canCreate,
+      canModify: decoded.canModify,
+    );
+  }
+
+  void _wireClient(FileBrowserClient client) {
+    // Persist renewed tokens so the cached JWT stays fresh between launches.
+    client.onTokenChanged = (t) => _store.saveJwt(t);
+    // A dead session (401 + failed renew) re-runs the direct login.
+    client.onSessionExpired = _handleSessionExpired;
+    _client = client;
+  }
+
+  /// Re-runs the direct login from stored credentials when the session expires
+  /// irrecoverably. We never relock behind biometrics here.
   Future<void> _handleSessionExpired() async {
     await _store.clearJwt();
     final creds = await _store.read();
@@ -200,12 +248,8 @@ class AuthController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    _loginTarget = LoginTarget(
-      baseUrl: creds.baseUrl,
-      username: creds.username,
-      password: creds.password,
-    );
-    _setStage(AuthStage.needsLogin);
+    await _loginAndSelectSource(creds.baseUrl, creds.username, creds.password,
+        onFailure: AuthStage.locked);
   }
 
   void _setStage(AuthStage s) {

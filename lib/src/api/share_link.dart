@@ -1,26 +1,26 @@
 import 'models.dart';
 
-/// Builds the human-facing public share-page URL: `<baseUrl>/share/<hash>`.
+/// Builds the human-facing public share-page URL: `<baseUrl>/public/share/<hash>`.
 ///
-/// The File Browser SPA serves the share page at `/share/<hash>` (the public
-/// JSON/download APIs live separately under `/api/public/share/<hash>` and
-/// `/api/public/dl/<hash>`). This is the link a user hands to someone else, so
-/// it must be the SPA URL, not an `/api/...` endpoint. Tolerates a trailing
-/// slash (or several) on [baseUrl]. PURE — see `share_link_test.dart`.
+/// Quantum serves the share page at `/public/share/<hash>` (this is the exact
+/// `shareURL` the create-share response advertises). A bare `/share/<hash>` only
+/// 301-redirects there, so the canonical `/public/...` path is used directly —
+/// it's the link a user hands to someone else. Tolerates a trailing slash (or
+/// several) on [baseUrl]. PURE — see `share_link_test.dart`.
 String publicShareUrl(String baseUrl, String hash) {
   var b = baseUrl.trim();
   while (b.endsWith('/')) {
     b = b.substring(0, b.length - 1);
   }
-  return '$b/share/$hash';
+  return '$b/public/share/$hash';
 }
 
 /// Expiry units offered in the create-share dialog.
 ///
 /// The server only understands `seconds`/`minutes`/`hours`/`days` and silently
-/// treats any other unit as `hours` (see upstream `share.go` `sharePostHandler`),
-/// so [weeks]/[months] are converted to an equivalent day count by
-/// [shareExpiryParams] before being sent. [never] produces a non-expiring share.
+/// treats any other unit as `hours`, so [weeks]/[months] are converted to an
+/// equivalent day count by [shareExpiryParams] before being sent. [never]
+/// produces a non-expiring share.
 enum ShareExpiryUnit { hours, days, weeks, months, never }
 
 extension ShareExpiryUnitLabel on ShareExpiryUnit {

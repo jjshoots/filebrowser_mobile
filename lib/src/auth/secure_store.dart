@@ -4,7 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 /// storage. On Android this is backed by the Keystore + EncryptedSharedPreferences.
 ///
 /// We store the long-lived *credentials* (not the short-lived 2h JWT) so that a
-/// biometric unlock can always mint a fresh token via `/api/login`.
+/// biometric unlock can always mint a fresh token via `/api/auth/login`.
 class SecureStore {
   SecureStore([FlutterSecureStorage? storage])
       : _storage = storage ??

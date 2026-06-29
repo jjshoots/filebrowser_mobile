@@ -5,11 +5,12 @@ import 'package:dio/dio.dart';
 import 'models.dart';
 
 /// Thrown when the session can no longer be refreshed: a 401 was met and a
-/// `/api/renew` attempt also failed (or the token is structurally expired).
+/// `/api/auth/renew` attempt also failed (or the token is structurally
+/// expired).
 ///
-/// The UI/AuthController reacts by routing back to the captcha WebView login;
-/// it must never trigger a silent retry loop. See [FileBrowserClient]'s 401
-/// interceptor and [FileBrowserClient.onSessionExpired].
+/// The AuthController reacts by re-running the direct login (credentials live in
+/// secure storage); it must never trigger a silent retry loop. See
+/// [FileBrowserClient]'s 401 interceptor and [FileBrowserClient.onSessionExpired].
 class SessionExpiredException implements Exception {
   const SessionExpiredException([this.message = 'Session expired']);
   final String message;
@@ -17,12 +18,16 @@ class SessionExpiredException implements Exception {
   String toString() => 'SessionExpiredException: $message';
 }
 
-/// Thin wrapper over the File Browser HTTP API.
+/// Thin wrapper over the filebrowser quantum HTTP API.
 ///
-/// Auth model: `POST /api/login` returns a JWT as a *plain-text* body. That
-/// token is sent on every request via the `X-Auth` header. The server sets the
-/// `X-Renew-Token: true` response header when the token is close to expiry; we
-/// transparently call `/api/renew` when we see it.
+/// Auth model: `POST /api/auth/login` returns a JWT as a *plain-text* body. That
+/// token is sent on every request via `Authorization: Bearer <jwt>`. The server
+/// sets the `X-Renew-Token: true` response header when the token is close to
+/// expiry; we transparently call `/api/auth/renew` when we see it.
+///
+/// Quantum is multi-source: every path-scoped call carries a `source` query
+/// param. The client holds the [source] selected by the UI and injects it, so
+/// call sites pass only paths.
 class FileBrowserClient {
   FileBrowserClient({required String baseUrl, HttpClientAdapter? adapter})
       : _baseUrl = _normalizeBase(baseUrl),
@@ -44,7 +49,7 @@ class FileBrowserClient {
   final Dio _dio;
   final String _baseUrl;
 
-  // Marks the internal `/api/renew` call so a 401 on renew itself is NOT
+  // Marks the internal `/api/auth/renew` call so a 401 on renew itself is NOT
   // retried (which would loop) — it surfaces as a SessionExpiredException.
   static const _kRenewMarker = '__fb_renew__';
   // Marks a request that has already been retried once after a renew, so the
@@ -52,28 +57,35 @@ class FileBrowserClient {
   static const _kRetriedMarker = '__fb_retried__';
 
   String? _token;
+  String? _source;
   bool _renewPending = false;
 
   /// Called whenever the token changes (initial adoption or renewal) so the
-  /// caller can persist it. Captcha-protected servers can't silently re-login,
-  /// so keeping the cached JWT fresh via renew matters.
+  /// caller can persist it.
   void Function(String token)? onTokenChanged;
 
   /// Invoked when the session is irrecoverably expired (renew failed on a 401).
-  /// The AuthController wires this to route back to the WebView login.
   void Function()? onSessionExpired;
 
   String get baseUrl => _baseUrl;
   String? get token => _token;
   bool get isAuthenticated => _token != null;
 
-  /// Adopt a JWT obtained out-of-band (e.g. harvested from the WebView login).
+  /// Name of the currently selected source, injected into every path-scoped
+  /// request. Null until the UI selects one after login.
+  String? get source => _source;
+
+  /// Selects the current source (see [source]).
+  void setSource(String name) => _source = name;
+
+  /// Adopt a JWT obtained out-of-band (e.g. restored from secure storage).
   void adoptToken(String token) {
     _token = token.trim();
     _renewPending = false;
   }
 
-  /// Decode the `user` claim from a JWT (same shape as the login response).
+  /// Decode the permissions claim from a JWT. The username is not carried in the
+  /// token, so it is left blank here (the login flow knows it).
   static FbUser userFromToken(String jwt) => _decodeUser(jwt);
 
   /// Whether [jwt] is well-formed and not within [margin] of expiring.
@@ -92,43 +104,51 @@ class FileBrowserClient {
     return u.endsWith('/') ? u.substring(0, u.length - 1) : u;
   }
 
-  /// Builds `<base>/api/<segment>` exactly (no trailing slash). Used for the
-  /// auth endpoints (login/renew/signup), which gorilla/mux serves without a
-  /// trailing slash — `/api/login/` 404s.
+  /// Builds `<base>/api/<segment>` (no trailing slash).
   Uri _endpoint(String segment) => Uri.parse('$_baseUrl/api/$segment');
 
-  /// Builds `<base>/api/<segment>/<url-encoded path>`.
-  Uri _api(String segment, [String path = '/']) {
-    final encoded = path
-        .split('/')
-        .map(Uri.encodeComponent)
-        .join('/');
-    final normalized = encoded.startsWith('/') ? encoded : '/$encoded';
-    return Uri.parse('$_baseUrl/api/$segment$normalized');
+  /// Builds `<base>/api/<segment>?source=<S>&...`. The current [source] is
+  /// always injected first; [extra] adds the call-specific params (path, etc.).
+  Uri _scopedUri(String segment, [Map<String, dynamic>? extra]) {
+    final qp = <String, dynamic>{};
+    final s = _source;
+    if (s != null && s.isNotEmpty) qp['source'] = s;
+    if (extra != null) qp.addAll(extra);
+    return _endpoint(segment).replace(queryParameters: qp);
   }
 
+  /// Joins a directory path and a child name with a single separator.
+  static String _join(String dir, String name) =>
+      dir.endsWith('/') ? '$dir$name' : '$dir/$name';
+
+  Map<String, String>? _bearer() =>
+      _token == null ? null : {'Authorization': 'Bearer $_token'};
+
   Options _authOptions({ResponseType? responseType}) => Options(
-        headers: _token == null ? null : {'X-Auth': _token},
+        headers: _bearer(),
         responseType: responseType,
       );
 
   /// Authenticates and stores the JWT in memory. Returns the decoded user.
-  Future<FbUser> login(String username, String password) async {
+  ///
+  /// Quantum takes the username via query and the password (URL-encoded) and
+  /// optional TOTP code via the `X-Password`/`X-Secret` headers; the JWT comes
+  /// back as a plain-text body.
+  Future<FbUser> login(String username, String password, {String otp = ''}) async {
     final resp = await _dio.postUri(
-      _endpoint('login'),
-      data: jsonEncode({
-        'username': username,
-        'password': password,
-        'recaptcha': '',
-      }),
+      _endpoint('auth/login')
+          .replace(queryParameters: {'username': username, 'recaptcha': ''}),
       options: Options(
-        contentType: Headers.jsonContentType,
+        headers: {
+          'X-Password': Uri.encodeComponent(password),
+          'X-Secret': otp,
+        },
         responseType: ResponseType.plain,
       ),
     );
     _token = (resp.data as String).trim();
     _renewPending = false;
-    return _decodeUser(_token!);
+    return _decodeUser(_token!, username: username);
   }
 
   /// Soft renew: only when the server flagged `X-Renew-Token: true`. No-op if
@@ -141,9 +161,9 @@ class FileBrowserClient {
   /// On-demand freshness check (call on screen resume / before a transfer).
   ///
   /// Renews when the server asked us to, or when the cached token is within
-  /// [margin] of expiry — staying ahead of the 401 path. Renewal is captcha
-  /// free (`/api/renew`). Throws [SessionExpiredException] and fires
-  /// [onSessionExpired] if the token cannot be refreshed.
+  /// [margin] of expiry — staying ahead of the 401 path. Throws
+  /// [SessionExpiredException] and fires [onSessionExpired] if the token cannot
+  /// be refreshed.
   Future<void> ensureFreshSession({
     Duration margin = const Duration(minutes: 5),
   }) async {
@@ -158,13 +178,13 @@ class FileBrowserClient {
     }
   }
 
-  /// Exchanges the current token for a fresh one via `/api/renew`. The request
-  /// is marked so the 401 interceptor leaves it alone (no retry loop).
+  /// Exchanges the current token for a fresh one via `/api/auth/renew`. The
+  /// request is marked so the 401 interceptor leaves it alone (no retry loop).
   Future<void> _renewToken() async {
     final resp = await _dio.postUri(
-      _endpoint('renew'),
+      _endpoint('auth/renew'),
       options: Options(
-        headers: _token == null ? null : {'X-Auth': _token},
+        headers: _bearer(),
         responseType: ResponseType.plain,
         extra: const {_kRenewMarker: true},
       ),
@@ -179,17 +199,17 @@ class FileBrowserClient {
     onSessionExpired?.call();
   }
 
-  /// 401 handler: on an authenticated request, attempt ONE `/api/renew` then
-  /// replay the original request with the fresh token. If renew fails (or the
-  /// request is itself the renew call), surface [SessionExpiredException] and
-  /// fire [onSessionExpired]. Non-401 errors pass straight through.
+  /// 401 handler: on an authenticated request, attempt ONE `/api/auth/renew`
+  /// then replay the original request with the fresh token. If renew fails (or
+  /// the request is itself the renew call), surface [SessionExpiredException]
+  /// and fire [onSessionExpired]. Non-401 errors pass straight through.
   Future<void> _onError(
     DioException err,
     ErrorInterceptorHandler handler,
   ) async {
     final req = err.requestOptions;
     final is401 = err.response?.statusCode == 401;
-    final wasAuthenticated = req.headers.containsKey('X-Auth');
+    final wasAuthenticated = req.headers.containsKey('Authorization');
     final isRenew = req.extra[_kRenewMarker] == true;
     final alreadyRetried = req.extra[_kRetriedMarker] == true;
 
@@ -216,7 +236,7 @@ class FileBrowserClient {
 
     // Replay the original request once with the refreshed token.
     req.extra[_kRetriedMarker] = true;
-    req.headers['X-Auth'] = _token;
+    req.headers['Authorization'] = 'Bearer $_token';
     try {
       final replayed = await _dio.fetch<dynamic>(req);
       handler.resolve(replayed);
@@ -225,11 +245,11 @@ class FileBrowserClient {
     }
   }
 
-  /// Lists a directory. [path] is server-relative (`/` is the root scope).
+  /// Lists a directory. [path] is source-relative (`/` is the source root).
   Future<FbResource> listDirectory(String path) async {
     await renewIfNeeded();
     final resp = await _dio.getUri(
-      _api('resources', path),
+      _scopedUri('resources', {'path': path}),
       options: _authOptions(),
     );
     final data = resp.data;
@@ -237,139 +257,205 @@ class FileBrowserClient {
     return FbResource.fromJson(map as Map<String, dynamic>);
   }
 
-  /// Direct download URL for [path] (single file, or a bundle with `?algo=zip`).
-  /// The caller hands this to the background downloader together with [token].
-  Uri rawDownloadUri(String path, {String? algo}) {
-    final uri = _api('raw', path);
-    return algo == null ? uri : uri.replace(queryParameters: {'algo': algo});
+  /// Lightweight remote-existence probe (e.g. for upload conflict detection).
+  ///
+  /// Issues `GET /api/resources?path=&source=`: 200 means the path exists, 404
+  /// means it does not. Other statuses propagate as [DioException].
+  Future<bool> resourceExists(String path) async {
+    await renewIfNeeded();
+    try {
+      await _dio.getUri(_scopedUri('resources', {'path': path}),
+          options: _authOptions());
+      return true;
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404) return false;
+      rethrow;
+    }
   }
+
+  /// Checksum of [path] using [algo] (`md5`/`sha1`/`sha256`/`sha512`).
+  ///
+  /// The resources endpoint returns the file metadata with a `checksums` map
+  /// when asked for one; we return the hex digest for [algo].
+  Future<String> checksum(String path, {String algo = 'sha256'}) async {
+    await renewIfNeeded();
+    final resp = await _dio.getUri(
+      _scopedUri('resources', {'path': path, 'checksum': algo}),
+      options: _authOptions(),
+    );
+    final map = _asMap(resp.data);
+    final sums = map['checksums'];
+    if (sums is Map && sums[algo] is String) return sums[algo] as String;
+    return '';
+  }
+
+  /// Raw file URL for in-app viewing/streaming. [inline] sets inline
+  /// disposition. Requires [authHeaders].
+  Uri rawUri(String path, {bool inline = false}) => _scopedUri(
+        'resources/download',
+        {'file': path, if (inline) 'inline': 'true'},
+      );
+
+  /// Direct download URL for [path] (a single file, or a bundle with `algo`).
+  /// The caller hands this to the background downloader with [authHeaders].
+  Uri rawDownloadUri(String path, {String? algo}) => _scopedUri(
+        'resources/download',
+        {'file': path, if (algo != null) 'algo': algo},
+      );
 
   /// Archive download URL for several entries that live directly inside
-  /// [dirPath]: `GET /api/raw/<dir>?files=<a,b,…>&algo=zip`.
-  ///
-  /// The server reads the `files` value, splits it on commas, then
-  /// `url.QueryUnescape`s each name a *second* time (see upstream `raw.go`
-  /// `parseQueryFiles`). We therefore pre-encode each [names] entry once and let
-  /// the URI serialise the second layer — symmetric with [_patchDestUri]'s
-  /// double-encoded `destination`. Each name is a single path segment relative
-  /// to [dirPath] (i.e. a child's `name`); folders are zipped recursively.
+  /// [dirPath]: each `file` param is the full source-scoped path
+  /// (`join(dirPath, name)`), repeated, with `algo` (zip/tar.gz).
   Uri rawBundleDownloadUri(String dirPath, List<String> names,
       {String algo = 'zip'}) {
-    final files = names.map(Uri.encodeComponent).join(',');
-    return _api('raw', dirPath)
-        .replace(queryParameters: {'files': files, 'algo': algo});
+    final files = names.map((n) => _join(dirPath, n)).toList();
+    return _scopedUri('resources/download', {'file': files, 'algo': algo});
   }
+
+  /// Thumbnail/preview URL. [size] is 'small', 'large' or 'original'. Requires
+  /// [authHeaders].
+  Uri previewUri(String path, {String size = 'small'}) => _scopedUri(
+        'resources/preview',
+        {'path': path, 'size': size, 'inline': 'true'},
+      );
 
   /// Upload target URL: `POST` here with the file's raw bytes as the body.
-  Uri uploadUri(String path, {bool override = true}) {
-    return _api('resources', path)
-        .replace(queryParameters: {'override': override.toString()});
-  }
+  /// The server replies 409 Conflict when the path exists and [override] is
+  /// false.
+  Uri uploadUri(String path, {bool override = true}) => _scopedUri(
+        'resources',
+        {'path': path, 'override': override.toString()},
+      );
 
-  /// Thumbnail/preview URL. [size] is 'thumb' or 'big'. Requires [authHeaders].
-  Uri previewUri(String path, {String size = 'thumb'}) =>
-      _api('preview/$size', path);
-
-  /// Raw file URL for in-app viewing/streaming. [inline] sets inline disposition.
-  Uri rawUri(String path, {bool inline = false}) {
-    final uri = _api('raw', path);
-    return inline ? uri.replace(queryParameters: {'inline': 'true'}) : uri;
-  }
-
-  /// Headers for image/video loaders (CachedNetworkImage, VideoPlayer, …).
+  /// Headers for image/video loaders (CachedNetworkImage, VideoPlayer, …) and
+  /// the background downloader.
   Map<String, String> get authHeaders =>
-      _token == null ? const {} : {'X-Auth': _token!};
+      _token == null ? const {} : {'Authorization': 'Bearer $_token'};
 
-  /// Builds a `PATCH /api/resources/<src>?action=&destination=&override=` URI.
-  ///
-  /// The server unescapes `destination` *twice* (once via `r.URL.Query()`, then
-  /// again with `url.QueryUnescape`), so we pre-encode each path segment here
-  /// and let Dio percent-encode the whole value a second time. Path separators
-  /// are preserved so the server reconstructs nested destinations correctly.
-  Uri _patchDestUri(String src, String dst, String action, bool overwrite) {
-    final encoded = dst.split('/').map(Uri.encodeComponent).join('/');
-    return _api('resources', src).replace(queryParameters: {
-      'action': action,
-      'destination': encoded.startsWith('/') ? encoded : '/$encoded',
-      'override': overwrite.toString(),
-    });
-  }
-
-  /// Rename [fromPath] to [toPath] within the same parent directory.
-  /// Thin wrapper over [move] (the server treats both as `action=rename`).
-  Future<void> rename(String fromPath, String toPath) =>
-      move(fromPath, toPath);
-
-  /// Cross-directory move of [src] to [dst] (`action=rename`). When [overwrite]
-  /// is false and [dst] already exists the server responds 409 Conflict.
-  Future<void> move(String src, String dst, {bool overwrite = false}) async {
+  /// Creates a directory (`POST /api/resources?path=&source=&isDir=true`).
+  Future<void> makeDirectory(String path) async {
     await renewIfNeeded();
-    await _dio.patchUri(
-      _patchDestUri(src, dst, 'rename', overwrite),
+    await _dio.postUri(
+      _scopedUri('resources', {'path': path, 'isDir': 'true'}),
       options: _authOptions(),
     );
   }
 
-  /// Copy [src] to [dst] (`action=copy`). When [overwrite] is false and [dst]
-  /// already exists the server responds 409 Conflict.
-  Future<void> copy(String src, String dst, {bool overwrite = false}) async {
+  Future<void> delete(String path) async {
     await renewIfNeeded();
-    await _dio.patchUri(
-      _patchDestUri(src, dst, 'copy', overwrite),
+    await _dio.deleteUri(
+      _scopedUri('resources', {'path': path}),
       options: _authOptions(),
     );
   }
 
-  /// Full-text search under [path] for [query].
+  /// Move/copy/rename body for [src] -> [dst] within the current source.
   ///
-  /// The endpoint streams newline-delimited JSON (`{"dir":bool,"path":string}`)
-  /// with periodic empty heartbeat lines; we read the whole body and parse each
-  /// non-empty line. [path] is the search root; result paths are relative to it.
-  Future<List<FbSearchResult>> search(String path, String query) async {
+  /// `rename:true` (our "keep both") makes the server auto-version a conflicting
+  /// destination; `overwrite:true` overwrites. Same-dir rename uses
+  /// `action:rename`, cross-dir move uses `action:move`, copy uses `action:copy`.
+  Future<void> _patch(
+    String action,
+    String src,
+    String dst, {
+    required bool overwrite,
+    required bool keepBoth,
+  }) async {
     await renewIfNeeded();
-    final uri = _api('search', path).replace(queryParameters: {'query': query});
+    final s = _source;
+    await _dio.patchUri(
+      _endpoint('resources'),
+      data: jsonEncode({
+        'action': action,
+        'items': [
+          {'fromSource': s, 'fromPath': src, 'toSource': s, 'toPath': dst},
+        ],
+        'overwrite': overwrite,
+        'rename': keepBoth,
+      }),
+      options: Options(headers: _bearer(), contentType: Headers.jsonContentType),
+    );
+  }
+
+  /// Cross-directory move of [src] to [dst] (`action:move`).
+  Future<void> move(String src, String dst,
+          {bool overwrite = false, bool keepBoth = false}) =>
+      _patch('move', src, dst, overwrite: overwrite, keepBoth: keepBoth);
+
+  /// Copy [src] to [dst] (`action:copy`).
+  Future<void> copy(String src, String dst,
+          {bool overwrite = false, bool keepBoth = false}) =>
+      _patch('copy', src, dst, overwrite: overwrite, keepBoth: keepBoth);
+
+  /// Rename [from] to [to] within the same parent directory (`action:rename`).
+  Future<void> rename(String from, String to) =>
+      _patch('rename', from, to, overwrite: false, keepBoth: false);
+
+  /// Full-text search under [scope] for [query] in the current source.
+  ///
+  /// Hits `GET /api/tools/search?query=&sources=<S>&scope=<base/>`. Results are
+  /// a plain JSON array; each `path` is absolute within the source's user scope.
+  Future<List<FbSearchResult>> search(String scope, String query) async {
+    await renewIfNeeded();
+    var base = scope.endsWith('/') ? scope : '$scope/';
+    final qp = <String, dynamic>{
+      'query': query,
+      if (_source != null) 'sources': _source,
+      'scope': base,
+    };
     final resp = await _dio.getUri(
-      uri,
-      options: _authOptions(responseType: ResponseType.plain),
+      _endpoint('tools/search').replace(queryParameters: qp),
+      options: _authOptions(),
     );
-    final body = (resp.data as String?) ?? '';
-    final out = <FbSearchResult>[];
-    for (final line in const LineSplitter().convert(body)) {
-      final trimmed = line.trim();
-      if (trimmed.isEmpty) continue; // heartbeat
-      final decoded = jsonDecode(trimmed);
-      if (decoded is Map<String, dynamic>) {
-        out.add(FbSearchResult.fromJson(decoded));
+    final data = resp.data is String ? jsonDecode(resp.data as String) : resp.data;
+    if (data is! List) return const [];
+    return data
+        .whereType<Map>()
+        .map((m) => FbSearchResult.fromJson(m.cast<String, dynamic>()))
+        .toList();
+  }
+
+  /// Discovers the available sources (`GET /api/settings/sources`), keyed by
+  /// source name. Each entry carries the source's disk usage when reported.
+  Future<Map<String, FbSource>> listSources() async {
+    await renewIfNeeded();
+    final resp = await _dio.getUri(
+      _endpoint('settings/sources'),
+      options: _authOptions(),
+    );
+    final map = _asMap(resp.data);
+    final out = <String, FbSource>{};
+    map.forEach((name, value) {
+      if (value is Map) {
+        out[name] = FbSource.fromJson(name, value.cast<String, dynamic>());
       }
-    }
+    });
     return out;
   }
 
-  /// Disk usage for [path] (`GET /api/usage/<path>` -> `{total, used}`).
-  Future<FbUsage> diskUsage(String path) async {
-    await renewIfNeeded();
-    final resp = await _dio.getUri(_api('usage', path), options: _authOptions());
-    final map = _asMap(resp.data);
-    return FbUsage.fromJson(map);
+  /// Disk usage for the current source, derived from [listSources]. Null when no
+  /// usage is available (source unindexed or unknown).
+  Future<FbUsage?> diskUsage() async {
+    final sources = await listSources();
+    final s = _source;
+    final src = (s != null ? sources[s] : null) ??
+        (sources.length == 1 ? sources.values.first : null);
+    return src?.usage;
   }
 
-  /// All shares visible to the user (`GET /api/shares`). Admins see every share.
+  /// All shares visible to the user (`GET /api/share/list`).
   Future<List<FbShare>> listShares() async {
     await renewIfNeeded();
-    final resp = await _dio.getUri(_endpoint('shares'), options: _authOptions());
+    final resp =
+        await _dio.getUri(_endpoint('share/list'), options: _authOptions());
     return _asShareList(resp.data);
   }
 
-  /// Create a share for [path] (`POST /api/share/<path>`).
+  /// Create a share for [path] in the current source (`POST /api/share`).
   ///
   /// [expires] is a count and [unit] its granularity (`seconds`/`minutes`/
-  /// `hours`/`days`; the server defaults to hours).
-  ///
-  /// Note: this server version's share-creation response only renders
-  /// `{hash, path, userID, expire, hasPassword}` (see upstream
-  /// `share.go` `shareResponse`), so [FbShare.token] is always null here —
-  /// even for password-protected shares. Do not rely on obtaining a
-  /// password-bypass token from this call.
+  /// `hours`/`days`). The response carries the new share, including a [token]
+  /// for password-protected shares.
   Future<FbShare> createShare(
     String path, {
     String? password,
@@ -378,65 +464,47 @@ class FileBrowserClient {
   }) async {
     await renewIfNeeded();
     final resp = await _dio.postUri(
-      _api('share', path),
+      _endpoint('share'),
       data: jsonEncode({
+        'path': path,
+        if (_source != null) 'source': _source,
         'password': password ?? '',
         'expires': expires ?? '',
         'unit': unit ?? '',
       }),
-      options: Options(
-        headers: _token == null ? null : {'X-Auth': _token},
-        contentType: Headers.jsonContentType,
-      ),
+      options: Options(headers: _bearer(), contentType: Headers.jsonContentType),
     );
     return FbShare.fromJson(_asMap(resp.data));
   }
 
-  /// Delete the share identified by [hash] (`DELETE /api/share/<hash>`).
+  /// Delete the share identified by [hash] (`DELETE /api/share?hash=<hash>`).
   Future<void> deleteShare(String hash) async {
     await renewIfNeeded();
-    await _dio.deleteUri(_api('share', hash), options: _authOptions());
+    await _dio.deleteUri(
+      _endpoint('share').replace(queryParameters: {'hash': hash}),
+      options: _authOptions(),
+    );
   }
 
-  /// Server capabilities/branding (`GET /api/settings`, admin-only).
+  /// Server capabilities/branding (`GET /api/settings`, admin-only). Returns
+  /// permissive defaults when the server forbids the call (non-admin user).
   Future<FbServerCaps> getSettings() async {
     await renewIfNeeded();
-    final resp =
-        await _dio.getUri(_endpoint('settings'), options: _authOptions());
-    return FbServerCaps.fromJson(_asMap(resp.data));
-  }
-
-  /// Checksum of [path] using [algo] (`md5`/`sha1`/`sha256`/`sha512`).
-  ///
-  /// File Browser computes checksums via the *resources* endpoint
-  /// (`GET /api/resources/<path>?checksum=<algo>`) — there is no `/api/raw`
-  /// checksum route — returning the file metadata with a `checksums` map and an
-  /// empty body. We return the hex digest for [algo].
-  Future<String> checksum(String path, {String algo = 'sha256'}) async {
-    await renewIfNeeded();
-    final uri =
-        _api('resources', path).replace(queryParameters: {'checksum': algo});
-    final resp = await _dio.getUri(uri, options: _authOptions());
-    final map = _asMap(resp.data);
-    final sums = map['checksums'];
-    if (sums is Map && sums[algo] is String) return sums[algo] as String;
-    return '';
-  }
-
-  /// Lightweight remote-existence probe for upload conflict detection.
-  ///
-  /// Issues `GET /api/resources/<path>`: 200 means the path exists, 404 means
-  /// it does not. This is the lightest *correct* check the API allows — there is
-  /// no HEAD route on `/api/resources`. For a file the server returns only its
-  /// metadata (a directory would return a full listing, so prefer probing the
-  /// concrete upload target). Other statuses propagate as [DioException].
-  Future<bool> resourceExists(String path) async {
-    await renewIfNeeded();
     try {
-      await _dio.getUri(_api('resources', path), options: _authOptions());
-      return true;
+      final resp = await _dio.getUri(
+        _endpoint('settings').replace(queryParameters: {'property': ''}),
+        options: _authOptions(),
+      );
+      return FbServerCaps.fromJson(_asMap(resp.data));
     } on DioException catch (e) {
-      if (e.response?.statusCode == 404) return false;
+      if (e.response?.statusCode == 403) {
+        return FbServerCaps(
+          signup: false,
+          createUserDir: false,
+          name: '',
+          tus: const FbTusConfig(),
+        );
+      }
       rethrow;
     }
   }
@@ -455,27 +523,18 @@ class FileBrowserClient {
         .toList();
   }
 
-  /// Creates a directory (`POST` with a trailing slash, empty body).
-  Future<void> makeDirectory(String path) async {
-    await renewIfNeeded();
-    final p = path.endsWith('/') ? path : '$path/';
-    await _dio.postUri(_api('resources', p), options: _authOptions());
-  }
-
-  Future<void> delete(String path) async {
-    await renewIfNeeded();
-    await _dio.deleteUri(_api('resources', path), options: _authOptions());
-  }
-
-  static FbUser _decodeUser(String jwt) {
+  static FbUser _decodeUser(String jwt, {String username = ''}) {
     final parts = jwt.split('.');
     if (parts.length != 3) {
-      return FbUser(username: '', canCreate: false, canModify: false);
+      return FbUser(username: username, canCreate: false, canModify: false);
     }
     final payload = utf8.decode(
       base64Url.decode(base64Url.normalize(parts[1])),
     );
-    return FbUser.fromClaims(jsonDecode(payload) as Map<String, dynamic>);
+    return FbUser.fromClaims(
+      jsonDecode(payload) as Map<String, dynamic>,
+      username: username,
+    );
   }
 
   static DateTime? _tokenExpiry(String jwt) {
@@ -486,8 +545,8 @@ class FileBrowserClient {
           jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))))
               as Map<String, dynamic>;
       final exp = payload['exp'];
-      if (exp is! int) return null;
-      return DateTime.fromMillisecondsSinceEpoch(exp * 1000);
+      if (exp is! num) return null;
+      return DateTime.fromMillisecondsSinceEpoch((exp * 1000).toInt());
     } catch (_) {
       return null;
     }

@@ -17,7 +17,8 @@ import 'support/mock_adapter.dart';
 /// AuthController test double exposing a canned client/user without touching the
 /// network or secure storage.
 class _FakeAuth extends AuthController {
-  _FakeAuth(this._client, this._user);
+  _FakeAuth(this._client, this._user, PreferencesStore prefs)
+      : super(prefs: prefs);
   final FileBrowserClient _client;
   final FbUser _user;
   @override
@@ -47,6 +48,7 @@ Widget _harness(PreferencesStore prefs) {
   final auth = _FakeAuth(
     client,
     FbUser(username: 'u', canCreate: true, canModify: true),
+    prefs,
   );
   return MultiProvider(
     providers: [

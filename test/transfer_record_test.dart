@@ -4,7 +4,7 @@ import 'package:filebrowser_mobile/src/transfers/transfer_record.dart';
 
 DownloadTask _dl({bool allowPause = true}) => DownloadTask(
     taskId: 'dl1',
-    url: 'https://x/api/raw/a.bin',
+    url: 'https://x/api/resources/download/a.bin',
     filename: 'a.bin',
     allowPause: allowPause);
 

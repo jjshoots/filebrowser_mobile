@@ -1,0 +1,14 @@
+# Test runner config.
+#
+# The `integration` tag marks the pure-Dart end-to-end tests in
+# test/integration/ that require a running quantum server (FB_TEST_URL).
+#
+# They are SKIPPED by default, so a bare `flutter test` (and the unit CI job)
+# runs them as no-ops — no server, no network. Opt in explicitly with
+#   flutter test --tags integration --run-skipped     (or `make e2e`)
+# which selects only the integration tests and runs the skipped ones.
+tags:
+  integration:
+    skip: "needs a live quantum server — run: flutter test --tags integration --run-skipped (or make e2e)"
+    # Networked, hits a live server — give each test room to breathe.
+    timeout: 2x

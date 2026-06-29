@@ -8,7 +8,7 @@ import '../api/models.dart';
 import 'file_details_sheet.dart';
 
 /// Full-screen, swipeable, pinch-to-zoom photo viewer over the images in a
-/// directory. Uses the server's `preview/big` (a transcoded JPEG) so exotic
+/// directory. Uses the server's large preview (a transcoded JPEG) so exotic
 /// formats (HEIC/RAW/etc.) still display.
 class ImageGalleryScreen extends StatefulWidget {
   const ImageGalleryScreen({
@@ -78,7 +78,7 @@ class _ImageGalleryScreenState extends State<ImageGalleryScreen> {
           final item = widget.images[i];
           return PhotoViewGalleryPageOptions(
             imageProvider: CachedNetworkImageProvider(
-              widget.client.previewUri(item.path, size: 'big').toString(),
+              widget.client.previewUri(item.path, size: 'large').toString(),
               headers: widget.client.authHeaders,
             ),
             minScale: PhotoViewComputedScale.contained,

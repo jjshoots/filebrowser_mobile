@@ -22,5 +22,8 @@ android/key.properties
 .env
 *.env
 
+# Quantum test-server harness artifacts (binary, config, seed data, db)
+.quantum-test/
+
 # Misc
 .DS_Store

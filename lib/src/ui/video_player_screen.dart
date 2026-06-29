@@ -7,8 +7,8 @@ import '../api/models.dart';
 import 'error_display.dart';
 import 'file_details_sheet.dart';
 
-/// Streams a video from the server (Range-enabled `/api/raw`) with native
-/// controls. Auth is passed via the `X-Auth` HTTP header.
+/// Streams a video from the server (Range-enabled download endpoint) with native
+/// controls. Auth is passed via the `Authorization: Bearer` HTTP header.
 class VideoPlayerScreen extends StatefulWidget {
   const VideoPlayerScreen({
     super.key,

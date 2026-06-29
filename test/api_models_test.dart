@@ -34,6 +34,38 @@ void main() {
       expect(u.usedFraction, 0);
       expect(u.free, 0);
     });
+
+    test('fromJsonOrNull degrades when no real capacity is reported', () {
+      // A source's reduceIndex carries used/usedAlt/total; total<=0 => no gauge.
+      expect(FbUsage.fromJsonOrNull({'total': 0, 'used': 0}), isNull);
+      final u = FbUsage.fromJsonOrNull(
+          {'total': 1024 * 1024, 'used': 512 * 1024, 'usedAlt': 600 * 1024});
+      expect(u, isNotNull);
+      expect(u!.total, 1024 * 1024);
+      expect(u.used, 512 * 1024);
+    });
+  });
+
+  group('FbSource', () {
+    test('parses name + usage from a sources-endpoint entry', () {
+      final s = FbSource.fromJson('mydisk', {
+        'name': 'mydisk',
+        'used': 512 * 1024,
+        'usedAlt': 600 * 1024,
+        'total': 1024 * 1024,
+        'status': 'ready',
+      });
+      expect(s.name, 'mydisk');
+      expect(s.usage, isNotNull);
+      expect(s.usage!.used, 512 * 1024);
+      expect(s.usage!.total, 1024 * 1024);
+    });
+
+    test('usage is null when the source reports no capacity', () {
+      final s = FbSource.fromJson('empty', {'name': 'empty', 'total': 0});
+      expect(s.name, 'empty');
+      expect(s.usage, isNull);
+    });
   });
 
   group('FbShare', () {
@@ -41,12 +73,19 @@ void main() {
       final s = FbShare.fromJson({
         'hash': 'abc123',
         'path': '/docs/file.txt',
+        'source': 'mydisk',
+        'username': 'alice',
         'userID': 1,
         'expire': 0,
         'hasPassword': false,
+        // quantum attaches extra fields the model ignores
+        'downloadsLimit': 0,
+        'shareType': 'normal',
       });
       expect(s.hash, 'abc123');
       expect(s.path, '/docs/file.txt');
+      expect(s.source, 'mydisk');
+      expect(s.username, 'alice');
       expect(s.hasPassword, isFalse);
       expect(s.token, isNull);
       expect(s.expire, 0);
@@ -54,9 +93,9 @@ void main() {
       expect(s.isExpired, isFalse);
     });
 
-    // This server version never emits `token`, but the parser keeps the field
-    // nullable for forward-compat: if a future server adds it, fromJson maps it.
-    test('forward-compat: maps a token field when present', () {
+    // The server returns `token` only for password-protected shares; the parser
+    // maps it when present and leaves it null otherwise.
+    test('maps the bypass token of a password-protected share', () {
       final s = FbShare.fromJson({
         'hash': 'h-_9',
         'path': '/p',
@@ -83,40 +122,91 @@ void main() {
   });
 
   group('FbSearchResult', () {
-    test('parses a streamed hit and derives the name', () {
-      final r = FbSearchResult.fromJson({'dir': false, 'path': 'a/b/c.txt'});
+    test('parses a hit and derives the name; isDir follows type', () {
+      final r = FbSearchResult.fromJson(
+          {'type': 'text', 'path': '/a/b/c.txt', 'source': 'mydisk'});
       expect(r.isDir, isFalse);
-      expect(r.path, 'a/b/c.txt');
+      expect(r.path, '/a/b/c.txt');
       expect(r.name, 'c.txt');
+      expect(r.source, 'mydisk');
     });
 
-    test('directory hit with trailing slash names the folder', () {
-      final r = FbSearchResult.fromJson({'dir': true, 'path': 'a/b/'});
+    test('directory hit (type=directory, trailing slash) names the folder', () {
+      final r = FbSearchResult.fromJson({'type': 'directory', 'path': '/a/b/'});
       expect(r.isDir, isTrue);
       expect(r.name, 'b');
     });
   });
 
   group('FbServerCaps', () {
-    test('parses branding name, signup, createUserDir and tus', () {
+    test('parses signup (auth.methods.password) and frontend branding name', () {
       final caps = FbServerCaps.fromJson({
-        'signup': true,
-        'createUserDir': true,
-        'branding': {'name': 'My Files'},
-        'tus': {'chunkSize': 5242880, 'retryCount': 3},
+        'auth': {
+          'methods': {
+            'password': {'signup': true},
+          },
+        },
+        'frontend': {'name': 'My Files'},
       });
       expect(caps.signup, isTrue);
-      expect(caps.createUserDir, isTrue);
       expect(caps.name, 'My Files');
-      expect(caps.tus.chunkSize, 5242880);
-      expect(caps.tus.retryCount, 3);
+      // quantum advertises no chunk config, so defaults apply.
+      expect(caps.tus.chunkSize, 10 * 1024 * 1024);
+      expect(caps.tus.retryCount, 5);
     });
 
-    test('applies tus defaults when missing/zero', () {
-      final caps = FbServerCaps.fromJson({'signup': false});
+    test('tolerates flat keys and applies defaults when missing', () {
+      final caps = FbServerCaps.fromJson({'signup': false, 'name': ''});
+      expect(caps.signup, isFalse);
       expect(caps.name, '');
       expect(caps.tus.chunkSize, 10 * 1024 * 1024);
       expect(caps.tus.retryCount, 5);
+    });
+  });
+
+  group('FbResource quantum directory shape', () {
+    test('merges folders+files into items and computes child paths', () {
+      final dir = FbResource.fromJson({
+        'name': 'photos',
+        'path': '/photos/',
+        'type': 'directory',
+        'source': 'mydisk',
+        'folders': [
+          {'name': '2024', 'type': 'directory'},
+        ],
+        'files': [
+          {'name': 'a.jpg', 'type': 'image', 'size': 10},
+          {'name': 'b.txt', 'type': 'text', 'size': 2},
+        ],
+      });
+      expect(dir.isDir, isTrue);
+      expect(dir.items.length, 3);
+      // Folders first, then files (matches the web client ordering).
+      final folder = dir.items[0];
+      expect(folder.name, '2024');
+      expect(folder.isDir, isTrue);
+      expect(folder.path, '/photos/2024/'); // trailing slash for directories
+      final img = dir.items[1];
+      expect(img.name, 'a.jpg');
+      expect(img.isDir, isFalse);
+      expect(img.path, '/photos/a.jpg');
+      expect(img.isImage, isTrue);
+    });
+
+    test('computes child paths at the source root', () {
+      final dir = FbResource.fromJson({
+        'name': '/',
+        'path': '/',
+        'type': 'directory',
+        'folders': [
+          {'name': 'docs', 'type': 'directory'},
+        ],
+        'files': [
+          {'name': 'readme.md', 'type': 'text'},
+        ],
+      });
+      expect(dir.items[0].path, '/docs/');
+      expect(dir.items[1].path, '/readme.md');
     });
   });
 

@@ -23,13 +23,14 @@ SearchTargetKind classifySearchResult(FbSearchResult r) {
   return SearchTargetKind.other;
 }
 
-/// Resolves a server search hit (whose [relative] path is RELATIVE to the
-/// searched [root]) into an absolute server path.
+/// Resolves a server search hit (whose [relative] path is relative to the
+/// source root, with no leading slash, e.g. `Documents/beta.md`, or `dir/` for
+/// folders) into an absolute server path under [root].
 ///
-/// The search endpoint returns paths relative to the searched directory (e.g.
-/// `sub/img.jpg`, or `dir/` for folders). We strip any stray leading slash and
-/// the trailing slash folders carry, then posix-join onto [root]. PURE — see
-/// `search_screen_test.dart` (root/nested/unicode cases).
+/// Callers resolve against the source root (`/`), since quantum returns hit
+/// paths from the source root regardless of the searched scope. We strip any
+/// stray leading slash and the trailing slash folders carry, then posix-join
+/// onto [root]. PURE — see `search_screen_test.dart` (root/nested/unicode cases).
 String resolveSearchPath(String root, String relative) {
   var rel = relative.trim();
   while (rel.startsWith('/')) {
@@ -87,6 +88,10 @@ class _SearchScreenState extends State<SearchScreen> {
 
   static const _debounceDelay = Duration(milliseconds: 350);
 
+  /// Quantum's search rejects queries shorter than this (HTTP 400, "query is
+  /// too short"), so we hold off firing one and keep prompting the user instead.
+  static const _minQueryLen = 3;
+
   @override
   void dispose() {
     _debounce?.cancel();
@@ -114,7 +119,9 @@ class _SearchScreenState extends State<SearchScreen> {
       _query = query;
       _error = null;
     });
-    if (query.isEmpty) {
+    if (query.length < _minQueryLen) {
+      // Too short for the server to accept: clear results and let the body show
+      // the "keep typing" hint rather than firing a doomed 400 request.
       setState(() {
         _loading = false;
         _results = const [];
@@ -140,7 +147,9 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   void _pick(FbSearchResult hit) {
-    final abs = resolveSearchPath(widget.root, hit.path);
+    // Quantum returns hit paths relative to the source root, so resolve from `/`
+    // rather than the searched directory.
+    final abs = resolveSearchPath('/', hit.path);
     Navigator.of(context).pop<SearchPick>((path: abs, isDir: hit.isDir));
   }
 
@@ -184,9 +193,12 @@ class _SearchScreenState extends State<SearchScreen> {
         onRetry: () => _run(_query),
       );
     }
-    if (_query.isEmpty) {
-      return const _Hint(
-          icon: Icons.search, text: 'Type to search this folder');
+    if (_query.length < _minQueryLen) {
+      return _Hint(
+          icon: Icons.search,
+          text: _query.isEmpty
+              ? 'Type to search this folder'
+              : 'Keep typing (at least $_minQueryLen characters)');
     }
     if (_results.isEmpty) {
       return _Hint(icon: Icons.search_off, text: 'No results for "$_query"');
@@ -196,7 +208,7 @@ class _SearchScreenState extends State<SearchScreen> {
       separatorBuilder: (_, __) => const Divider(height: 1),
       itemBuilder: (_, i) => _ResultTile(
         result: _results[i],
-        absolutePath: resolveSearchPath(widget.root, _results[i].path),
+        absolutePath: resolveSearchPath('/', _results[i].path),
         client: widget.client,
         onTap: () => _pick(_results[i]),
       ),

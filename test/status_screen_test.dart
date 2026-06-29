@@ -37,13 +37,18 @@ void main() {
   });
 
   group('tryLoadSettings (admin-only getSettings degrades gracefully)', () {
-    test('a 403 from getSettings collapses to null (no throw)', () async {
+    test('a 403 from getSettings degrades to permissive defaults (no throw)',
+        () async {
       final client =
           _client(MockAdapter((_) => MockAdapter.json({}, status: 403)));
-      expect(await tryLoadSettings(client), isNull);
+      final caps = await tryLoadSettings(client);
+      // getSettings swallows the admin-only 403 and yields permissive defaults.
+      expect(caps, isNotNull);
+      expect(caps!.signup, isFalse);
+      expect(caps.name, '');
     });
 
-    test('a network/other error also collapses to null', () async {
+    test('a network/other error collapses to null', () async {
       final client =
           _client(MockAdapter((_) => MockAdapter.json({}, status: 500)));
       expect(await tryLoadSettings(client), isNull);
@@ -51,8 +56,12 @@ void main() {
 
     test('a successful response is surfaced as caps', () async {
       final client = _client(MockAdapter((_) => MockAdapter.json({
-            'signup': true,
-            'branding': {'name': 'My Files'},
+            'auth': {
+              'methods': {
+                'password': {'signup': true},
+              },
+            },
+            'frontend': {'name': 'My Files'},
             'tus': {'chunkSize': 1024, 'retryCount': 3},
           })));
       final caps = await tryLoadSettings(client);

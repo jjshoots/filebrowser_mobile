@@ -26,21 +26,21 @@ FbShare _share({
 
 void main() {
   group('publicShareUrl (the user-facing SPA link)', () {
-    test('builds <base>/share/<hash>', () {
+    test('builds <base>/public/share/<hash>', () {
       expect(publicShareUrl('https://demo.example.com', 'aB_9-x'),
-          'https://demo.example.com/share/aB_9-x');
+          'https://demo.example.com/public/share/aB_9-x');
     });
 
     test('tolerates one or several trailing slashes on the base', () {
       expect(publicShareUrl('https://demo.example.com/', 'h'),
-          'https://demo.example.com/share/h');
+          'https://demo.example.com/public/share/h');
       expect(publicShareUrl('https://demo.example.com///', 'h'),
-          'https://demo.example.com/share/h');
+          'https://demo.example.com/public/share/h');
     });
 
     test('keeps a sub-path base (reverse-proxied install) intact', () {
       expect(publicShareUrl('https://host/fb/', 'h'),
-          'https://host/fb/share/h');
+          'https://host/fb/public/share/h');
     });
   });
 
@@ -118,9 +118,14 @@ void main() {
           password: 'secret', expires: e.expires, unit: e.unit);
       final req = adapter.requests.last;
       expect(req.method, 'POST');
-      expect(req.uri.toString(), contains('/api/share/photos/a.jpg'));
+      expect(req.uri.path, '/api/share');
       final body = jsonDecode(req.data as String) as Map<String, dynamic>;
-      expect(body, {'password': 'secret', 'expires': '14', 'unit': 'days'});
+      expect(body, {
+        'path': '/photos/a.jpg',
+        'password': 'secret',
+        'expires': '14',
+        'unit': 'days',
+      });
     });
 
     test('a never selection sends empty expires/unit', () async {
@@ -131,7 +136,7 @@ void main() {
       await c.createShare('/p', expires: e.expires, unit: e.unit);
       final body =
           jsonDecode(adapter.requests.last.data as String) as Map<String, dynamic>;
-      expect(body, {'password': '', 'expires': '', 'unit': ''});
+      expect(body, {'path': '/p', 'password': '', 'expires': '', 'unit': ''});
     });
   });
 
@@ -164,9 +169,11 @@ void main() {
       expect(find.text('/old.zip'), findsOneWidget);
       expect(find.text('Never expires'), findsOneWidget);
       expect(find.text('Expired'), findsOneWidget);
-      // The public SPA links are rendered (built from baseUrl + /share/<hash>).
-      expect(find.text('https://demo.example.com/share/aaa'), findsOneWidget);
-      expect(find.text('https://demo.example.com/share/bbb'), findsOneWidget);
+      // The public links are rendered (built from baseUrl + /public/share/<hash>).
+      expect(
+          find.text('https://demo.example.com/public/share/aaa'), findsOneWidget);
+      expect(
+          find.text('https://demo.example.com/public/share/bbb'), findsOneWidget);
       // Password-protected share shows a lock leading icon.
       expect(find.byIcon(Icons.lock), findsOneWidget);
     });

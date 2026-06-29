@@ -7,14 +7,14 @@ import '../auth/auth_controller.dart';
 import 'error_display.dart';
 import 'shares_screen.dart';
 
-/// Whether disk-usage figures are meaningful. The server reports `total=0` (and
-/// `used=0`) for non-directory paths, so a zero total means "unavailable" rather
-/// than a full/empty disk. PURE — see `status_screen_test.dart`.
+/// Whether disk-usage figures are meaningful. A source that is unindexed (or
+/// reports no capacity) yields `total=0`, so a zero total means "unavailable"
+/// rather than a full/empty disk. PURE — see `status_screen_test.dart`.
 bool diskUsageAvailable(FbUsage usage) => usage.total > 0;
 
 /// Loads server settings, degrading to `null` instead of throwing.
 ///
-/// `GET /api/settings` is admin-only upstream and returns 403 for normal users;
+/// `GET /api/settings` is admin-only and returns 403 for normal users;
 /// any failure (403, network, parse) collapses to `null` so the Status screen
 /// can simply omit the server-info section. PURE-ish (no UI) — see
 /// `status_screen_test.dart`.
@@ -35,22 +35,17 @@ class StatusScreen extends StatefulWidget {
     super.key,
     required this.client,
     required this.user,
-    this.usagePath = '/',
   });
 
   final FileBrowserClient client;
   final FbUser? user;
-
-  /// Path whose filesystem usage is reported. Defaults to the root scope; the
-  /// root is always a directory, so the server returns real figures.
-  final String usagePath;
 
   @override
   State<StatusScreen> createState() => _StatusScreenState();
 }
 
 class _StatusScreenState extends State<StatusScreen> {
-  late Future<FbUsage> _usage;
+  late Future<FbUsage?> _usage;
   late Future<FbServerCaps?> _settings;
 
   @override
@@ -60,7 +55,7 @@ class _StatusScreenState extends State<StatusScreen> {
   }
 
   void _load() {
-    _usage = widget.client.diskUsage(widget.usagePath);
+    _usage = widget.client.diskUsage();
     _settings = tryLoadSettings(widget.client);
   }
 
@@ -99,7 +94,7 @@ class _StatusScreenState extends State<StatusScreen> {
       );
 
   Widget _usageCard() {
-    return FutureBuilder<FbUsage>(
+    return FutureBuilder<FbUsage?>(
       future: _usage,
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
@@ -121,13 +116,14 @@ class _StatusScreenState extends State<StatusScreen> {
             ),
           );
         }
-        final usage = snap.data!;
-        if (!diskUsageAvailable(usage)) {
+        final usage = snap.data;
+        if (usage == null || !diskUsageAvailable(usage)) {
           return const Card(
             child: ListTile(
               leading: Icon(Icons.help_outline),
               title: Text('Disk usage unavailable'),
-              subtitle: Text('The server did not report capacity for this path.'),
+              subtitle:
+                  Text('The server did not report capacity for this source.'),
             ),
           );
         }

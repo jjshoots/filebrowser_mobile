@@ -93,22 +93,65 @@ class FbResource {
   final List<FbResource> items;
 
   factory FbResource.fromJson(Map<String, dynamic> json) {
-    final rawItems = json['items'];
-    return FbResource(
-      path: (json['path'] ?? '') as String,
-      name: (json['name'] ?? '') as String,
-      size: (json['size'] ?? 0) as int,
-      isDir: (json['isDir'] ?? false) as bool,
-      modified: json['modified'] as String?,
-      type: json['type'] as String?,
-      extension: json['extension'] as String?,
-      items: rawItems is List
+    final type = json['type'] as String?;
+    final path = (json['path'] ?? '') as String;
+    // A directory listing carries its children split into `folders` + `files`;
+    // a leaf resource carries neither. `isDir` follows the `type` field, falling
+    // back to a bare `isDir` flag when one is present.
+    final isDir = type == 'directory' || (json['isDir'] ?? false) as bool;
+
+    final folders = json['folders'];
+    final files = json['files'];
+    final List<FbResource> items;
+    if (folders is List || files is List) {
+      // Merge folders then files into one list (folders first, matching the web
+      // client) and compute each child's path from this directory's path, since
+      // children are returned without one.
+      final merged = <FbResource>[];
+      for (final raw in [
+        if (folders is List) ...folders,
+        if (files is List) ...files,
+      ]) {
+        if (raw is Map<String, dynamic>) {
+          merged.add(FbResource.fromJson(_withChildPath(raw, path)));
+        }
+      }
+      items = merged;
+    } else {
+      final rawItems = json['items'];
+      items = rawItems is List
           ? rawItems
               .whereType<Map<String, dynamic>>()
               .map(FbResource.fromJson)
               .toList()
-          : const [],
+          : const [];
+    }
+
+    return FbResource(
+      path: path,
+      name: (json['name'] ?? '') as String,
+      size: (json['size'] as num?)?.toInt() ?? 0,
+      isDir: isDir,
+      modified: json['modified'] as String?,
+      type: type,
+      extension: json['extension'] as String?,
+      items: items,
     );
+  }
+
+  /// Returns [child] with a computed `path` derived from [parentPath]: the
+  /// parent path joined with the child's name, plus a trailing slash for
+  /// directories. A pre-existing `path` is left untouched.
+  static Map<String, dynamic> _withChildPath(
+      Map<String, dynamic> child, String parentPath) {
+    final existing = child['path'];
+    if (existing is String && existing.isNotEmpty) return child;
+    final name = (child['name'] ?? '') as String;
+    final childIsDir = child['type'] == 'directory';
+    final parent =
+        parentPath.isEmpty || parentPath.endsWith('/') ? parentPath : '$parentPath/';
+    final base = parent.isEmpty ? '/$name' : '$parent$name';
+    return {...child, 'path': childIsDir ? '$base/' : base};
   }
 
   static const _imageExts = {
@@ -185,7 +228,11 @@ class FbResource {
   }
 }
 
-/// Minimal view of the authenticated user (decoded from the login JWT payload).
+/// Minimal view of the authenticated user.
+///
+/// The session JWT carries permissions but not the username (its payload holds
+/// a `Permissions` object and the user id under `belongsTo`), so the username is
+/// supplied separately from the login form.
 class FbUser {
   FbUser({required this.username, required this.canCreate, required this.canModify});
 
@@ -193,28 +240,35 @@ class FbUser {
   final bool canCreate;
   final bool canModify;
 
-  factory FbUser.fromClaims(Map<String, dynamic> claims) {
-    final user = (claims['user'] as Map<String, dynamic>? ) ?? const {};
-    final perm = (user['perm'] as Map<String, dynamic>?) ?? const {};
+  /// Builds a user from the decoded JWT [claims]. The session token exposes a
+  /// top-level `Permissions` map (`create`/`modify`/…); [username] comes from
+  /// the credentials used to log in.
+  factory FbUser.fromClaims(Map<String, dynamic> claims, {String username = ''}) {
+    final perm = (claims['Permissions'] as Map<String, dynamic>?) ??
+        (claims['permissions'] as Map<String, dynamic>?) ??
+        const {};
     return FbUser(
-      username: (user['username'] ?? '') as String,
+      username: username,
       canCreate: (perm['create'] ?? false) as bool,
       canModify: (perm['modify'] ?? false) as bool,
     );
   }
 }
 
-/// A single hit from `GET /api/search/<path>?query=...`.
+/// A single hit from `GET /api/tools/search`.
 ///
-/// The search endpoint streams newline-delimited JSON objects of the shape
-/// `{"dir": bool, "path": string}` (see the client's `search()` for parsing);
-/// [path] is relative to the searched directory.
+/// Results come back as a plain JSON array of `{path, type, source}` objects.
+/// [path] is absolute within the source's user scope (directories carry a
+/// trailing slash); [isDir] follows the `type` field.
 class FbSearchResult {
-  FbSearchResult({required this.path, required this.isDir});
+  FbSearchResult({required this.path, required this.isDir, this.source});
 
-  /// Path relative to the searched root, e.g. `photos/img.jpg`.
+  /// Source-scoped absolute path, e.g. `/photos/img.jpg`.
   final String path;
   final bool isDir;
+
+  /// Name of the source this hit belongs to (present in multi-source results).
+  final String? source;
 
   /// The last path segment (the file/folder name), trailing slash ignored.
   String get name {
@@ -226,52 +280,97 @@ class FbSearchResult {
 
   factory FbSearchResult.fromJson(Map<String, dynamic> json) => FbSearchResult(
         path: (json['path'] ?? '') as String,
-        isDir: (json['dir'] ?? false) as bool,
+        isDir: json['type'] == 'directory',
+        source: json['source'] as String?,
       );
 }
 
-/// Disk usage for a path, from `GET /api/usage/<path>` -> `{total, used}`.
+/// Disk usage for a source, derived from its entry in
+/// `GET /api/settings/sources` (`{used, usedAlt, total}` byte counts).
 ///
-/// Both values are byte counts. The server reports `0/0` for non-directories.
+/// `used` is the indexed (logical) size; `usedAlt` is the real disk space the
+/// source's filesystem reports as used; `total` is its capacity. The disk gauge
+/// binds to [usedAlt] (defaulting to [used] when not reported separately).
 class FbUsage {
-  FbUsage({required this.total, required this.used});
+  FbUsage({required this.total, required this.used, int? usedAlt})
+      : usedAlt = usedAlt ?? used;
 
-  /// Total capacity of the filesystem backing the path, in bytes.
+  /// Total capacity of the filesystem backing the source, in bytes.
   final int total;
 
-  /// Used space on that filesystem, in bytes.
+  /// Indexed (logical) size, in bytes.
   final int used;
 
+  /// Real disk space used on the backing filesystem, in bytes. The disk gauge
+  /// reports this rather than the logical index size.
+  final int usedAlt;
+
   /// Fraction of capacity used in `0.0..1.0` (0 when [total] is 0).
-  double get usedFraction => total == 0 ? 0 : used / total;
+  double get usedFraction => total == 0 ? 0 : usedAlt / total;
 
   /// Free space in bytes (never negative).
-  int get free => (total - used) < 0 ? 0 : total - used;
+  int get free => (total - usedAlt) < 0 ? 0 : total - usedAlt;
 
-  String get usedHuman => formatBytes(used);
+  String get usedHuman => formatBytes(usedAlt);
   String get totalHuman => formatBytes(total);
   String get freeHuman => formatBytes(free);
 
   factory FbUsage.fromJson(Map<String, dynamic> json) => FbUsage(
         total: (json['total'] as num?)?.toInt() ?? 0,
         used: (json['used'] as num?)?.toInt() ?? 0,
+        usedAlt: (json['usedAlt'] as num?)?.toInt(),
+      );
+
+  /// Like [fromJson] but returns null when no real capacity is reported (a
+  /// source that hasn't been indexed yet, or one without disk stats), so the
+  /// UI can degrade rather than render an empty `0 / 0` gauge.
+  static FbUsage? fromJsonOrNull(Map<String, dynamic> json) {
+    final total = (json['total'] as num?)?.toInt() ?? 0;
+    if (total <= 0) return null;
+    return FbUsage.fromJson(json);
+  }
+}
+
+/// A browsable source, from `GET /api/settings/sources`.
+///
+/// The endpoint returns a map keyed by source name; each value is the source's
+/// index summary, carrying its display [name] and, when available, disk
+/// [usage]. The backing filesystem path is not exposed by this endpoint.
+class FbSource {
+  FbSource({required this.name, this.path, this.usage});
+
+  /// Source name — the key used for the `source=` query param on every
+  /// path-scoped request.
+  final String name;
+
+  /// Backing filesystem path, when known (absent from the sources endpoint).
+  final String? path;
+
+  /// Disk usage for the source, or null when none is reported.
+  final FbUsage? usage;
+
+  factory FbSource.fromJson(String name, Map<String, dynamic> json) => FbSource(
+        name: name,
+        path: json['path'] as String?,
+        usage: FbUsage.fromJsonOrNull(json),
       );
 }
 
 /// A share link, from the `/api/share*` endpoints.
 ///
-/// The server deliberately never returns the bcrypt password hash; it exposes
-/// only [hasPassword]. [token] (a URL-safe bypass token for password-protected
-/// downloads) is NOT emitted by this server version on any endpoint — the
-/// share-creation response renders only `{hash, path, userID, expire,
-/// hasPassword}`. The field is kept nullable for forward-compatibility but is
-/// always null in practice against this server.
+/// The server never returns the bcrypt password hash; it exposes only
+/// [hasPassword]. [token] (a URL-safe bypass token used to download
+/// password-protected shares) is returned only when the share is password
+/// protected, so it stays nullable. Extra fields the server may attach
+/// (downloadsLimit, shareType, …) are ignored.
 class FbShare {
   FbShare({
     required this.hash,
     required this.path,
     required this.expire,
     required this.hasPassword,
+    this.source,
+    this.username,
     this.userID,
     this.token,
   });
@@ -279,8 +378,14 @@ class FbShare {
   /// Short random id used to build the public share URL (`/share/<hash>`).
   final String hash;
 
-  /// Server-relative path that is shared.
+  /// Source-scoped path that is shared.
   final String path;
+
+  /// Name of the source the shared path lives in.
+  final String? source;
+
+  /// Username of the share's creator (populated on listings).
+  final String? username;
 
   /// Unix expiry time in seconds; `0` means the share never expires.
   final int expire;
@@ -288,8 +393,7 @@ class FbShare {
   final bool hasPassword;
   final int? userID;
 
-  /// Bypass token for password-protected shares. Not emitted by this server
-  /// version, so always null in practice; kept for forward-compatibility.
+  /// Bypass token for downloading a password-protected share; null otherwise.
   final String? token;
 
   /// Whether the share has a finite expiry that is already in the past.
@@ -304,6 +408,8 @@ class FbShare {
   factory FbShare.fromJson(Map<String, dynamic> json) => FbShare(
         hash: (json['hash'] ?? '') as String,
         path: (json['path'] ?? '') as String,
+        source: json['source'] as String?,
+        username: json['username'] as String?,
         expire: (json['expire'] as num?)?.toInt() ?? 0,
         hasPassword: (json['hasPassword'] ?? false) as bool,
         userID: (json['userID'] as num?)?.toInt(),
@@ -311,11 +417,11 @@ class FbShare {
       );
 }
 
-/// tus.io chunked-upload parameters advertised by the server settings.
+/// Chunked-upload parameters used to size each upload chunk and bound the
+/// per-chunk retry budget.
 ///
-/// M5 (resumable uploads) will use these to size each PATCH chunk and bound the
-/// per-chunk retry budget. Defaults mirror the server's
-/// `DefaultTusChunkSize` (10 MiB) / `DefaultTusRetryCount` (5).
+/// The server advertises no chunk config, so these are local defaults (10 MiB
+/// chunks, 5 retries); kept as a model so call sites have a single source.
 class FbTusConfig {
   const FbTusConfig({this.chunkSize = 10 * 1024 * 1024, this.retryCount = 5});
 
@@ -338,8 +444,10 @@ class FbTusConfig {
 
 /// Server capabilities/branding, from `GET /api/settings` (admin-only).
 ///
-/// Only the fields a mobile client needs are modelled; the full settings
-/// payload (rules, user defaults, commands, …) is ignored.
+/// The endpoint returns the whole config tree; only the few fields a mobile
+/// client needs are modelled. Signup lives under `auth.methods.password`, the
+/// branding name under `frontend.name`. Flat keys are also tolerated so a
+/// trimmed payload (or a graceful 403 default) still maps.
 class FbServerCaps {
   FbServerCaps({
     required this.signup,
@@ -360,11 +468,14 @@ class FbServerCaps {
   final FbTusConfig tus;
 
   factory FbServerCaps.fromJson(Map<String, dynamic> json) {
-    final branding = json['branding'] as Map<String, dynamic>?;
+    final auth = json['auth'] as Map<String, dynamic>?;
+    final methods = auth?['methods'] as Map<String, dynamic>?;
+    final password = methods?['password'] as Map<String, dynamic>?;
+    final frontend = json['frontend'] as Map<String, dynamic>?;
     return FbServerCaps(
-      signup: (json['signup'] ?? false) as bool,
+      signup: (password?['signup'] ?? json['signup'] ?? false) as bool,
       createUserDir: (json['createUserDir'] ?? false) as bool,
-      name: (branding?['name'] ?? '') as String,
+      name: (frontend?['name'] ?? json['name'] ?? '') as String,
       tus: FbTusConfig.fromJson(json['tus'] as Map<String, dynamic>?),
     );
   }

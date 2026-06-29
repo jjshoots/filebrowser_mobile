@@ -13,9 +13,6 @@ dependencies:
   # Networking
   dio: ^5.7.0
 
-  # WebView used to complete captcha-protected logins and harvest the JWT
-  webview_flutter: ^4.10.0
-
   # In-app media: gallery grid thumbnails, zoomable photo viewer, video player
   cached_network_image: ^3.4.0
   photo_view: ^0.15.0

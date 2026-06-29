@@ -19,6 +19,7 @@ class PreferencesStore {
   static const _kSortKey = 'pref_sort_key';
   static const _kSortAsc = 'pref_sort_asc';
   static const _kDownloadDir = 'pref_download_dir';
+  static const _kSourceName = 'pref_source_name';
 
   /// Persisted sort column (defaults to [SortKey.name]).
   SortKey get sortKey {
@@ -58,6 +59,23 @@ class PreferencesStore {
       await _prefs.remove(_kDownloadDir);
     } else {
       await _prefs.setString(_kDownloadDir, dir);
+    }
+  }
+
+  /// The browsing source the user last selected, or null when none has been
+  /// chosen yet. Restored on launch/relogin and injected into the client before
+  /// any browsing. Empty strings normalise to null.
+  String? get sourceName {
+    final v = _prefs.getString(_kSourceName);
+    return (v == null || v.isEmpty) ? null : v;
+  }
+
+  /// Persists (or, with a null/empty [name], clears) the selected source.
+  Future<void> setSourceName(String? name) async {
+    if (name == null || name.isEmpty) {
+      await _prefs.remove(_kSourceName);
+    } else {
+      await _prefs.setString(_kSourceName, name);
     }
   }
 }

@@ -59,30 +59,39 @@ void main() {
 
   group('runTransferBatch (conflict + overwrite plumbing)', () {
     /// Builds a client whose `resourceExists` answers from [existing] and
-    /// records every PATCH; copy/move/makeDir return 200.
+    /// records every PATCH; copy/move return 200.
     (FileBrowserClient, MockAdapter) clientWith(Set<String> existing) {
       final adapter = MockAdapter((o) {
-        final isPatch = o.method == 'PATCH';
-        if (!isPatch && o.method == 'GET') {
-          // resourceExists probe against /api/resources/<path>
-          final decoded = Uri.decodeFull(o.uri.path).replaceFirst(
-              RegExp(r'^.*/api/resources'), '');
-          return existing.contains(decoded)
-              ? MockAdapter.json({'path': decoded})
+        if (o.method == 'GET') {
+          // resourceExists probe: GET /api/resources?source=&path=<p>
+          final path = o.uri.queryParameters['path'] ?? '';
+          return existing.contains(path)
+              ? MockAdapter.json({'path': path})
               : MockAdapter.json({}, status: 404);
         }
-        return MockAdapter.text('');
+        // PATCH move/copy
+        return MockAdapter.json({'succeeded': [], 'failed': []});
       });
       final client =
           FileBrowserClient(baseUrl: 'https://x.example', adapter: adapter)
-            ..adoptToken(_jwt(_nowS + 3600));
+            ..adoptToken(_jwt(_nowS + 3600))
+            ..setSource('mydisk');
       return (client, adapter);
     }
 
     List<RequestOptions> patches(MockAdapter a) =>
         a.requests.where((r) => r.method == 'PATCH').toList();
 
-    test('no conflict -> copy with override=false, never prompts', () async {
+    /// The single move/copy item descriptor from a PATCH's JSON body.
+    Map<String, dynamic> item0(RequestOptions r) {
+      final body = jsonDecode(r.data as String) as Map<String, dynamic>;
+      return (body['items'] as List).single as Map<String, dynamic>;
+    }
+
+    Map<String, dynamic> body(RequestOptions r) =>
+        jsonDecode(r.data as String) as Map<String, dynamic>;
+
+    test('no conflict -> copy with overwrite=false, never prompts', () async {
       final (client, adapter) = clientWith({});
       var prompts = 0;
       final res = await runTransferBatch(
@@ -99,14 +108,14 @@ void main() {
       expect(res.succeeded, 2);
       final ps = patches(adapter);
       expect(ps, hasLength(2));
-      expect(ps.every((r) => r.uri.queryParameters['action'] == 'copy'), isTrue);
-      expect(ps.every((r) => r.uri.queryParameters['override'] == 'false'),
-          isTrue);
-      expect(ps.map((r) => r.uri.queryParameters['destination']),
+      expect(ps.every((r) => body(r)['action'] == 'copy'), isTrue);
+      expect(ps.every((r) => body(r)['overwrite'] == false), isTrue);
+      expect(ps.every((r) => body(r)['rename'] == false), isTrue);
+      expect(ps.map((r) => item0(r)['toPath']),
           containsAll(['/dest/x.txt', '/dest/y.txt']));
     });
 
-    test('conflict + overwrite -> PATCH carries override=true', () async {
+    test('conflict + overwrite -> PATCH carries overwrite=true', () async {
       final (client, adapter) = clientWith({'/dest/x.txt'});
       final res = await runTransferBatch(
         client: client,
@@ -118,8 +127,9 @@ void main() {
       expect(res.succeeded, 1);
       final ps = patches(adapter);
       expect(ps, hasLength(1));
-      expect(ps.single.uri.queryParameters['action'], 'rename'); // move
-      expect(ps.single.uri.queryParameters['override'], 'true');
+      expect(body(ps.single)['action'], 'move');
+      expect(body(ps.single)['overwrite'], true);
+      expect(body(ps.single)['rename'], false);
     });
 
     test('conflict + skip -> no PATCH issued for that item', () async {
@@ -136,11 +146,9 @@ void main() {
       expect(patches(adapter), isEmpty);
     });
 
-    test('conflict + keepBoth -> retargets to a versioned, free name',
+    test('conflict + keepBoth -> PATCH carries rename=true (server versions)',
         () async {
-      // /dest/x.txt and /dest/x(1).txt taken; x(2).txt is free.
-      final (client, adapter) =
-          clientWith({'/dest/x.txt', '/dest/x(1).txt'});
+      final (client, adapter) = clientWith({'/dest/x.txt'});
       final res = await runTransferBatch(
         client: client,
         op: TransferOp.copy,
@@ -151,8 +159,28 @@ void main() {
       expect(res.succeeded, 1);
       final ps = patches(adapter);
       expect(ps, hasLength(1));
-      expect(ps.single.uri.queryParameters['destination'], '/dest/x(2).txt');
-      expect(ps.single.uri.queryParameters['override'], 'false');
+      // The original destination is sent; the server auto-versions it.
+      expect(item0(ps.single)['toPath'], '/dest/x.txt');
+      expect(body(ps.single)['rename'], true);
+      expect(body(ps.single)['overwrite'], false);
+    });
+
+    test('overwrite onto itself (same folder) is skipped, never sent',
+        () async {
+      // Copying a file into the directory it already lives in resolves to
+      // target == source; the server rejects this self-copy with a 500, so the
+      // batch must treat an "overwrite" choice here as a no-op skip.
+      final (client, adapter) = clientWith({'/a/x.txt'});
+      final res = await runTransferBatch(
+        client: client,
+        op: TransferOp.copy,
+        items: [_file('/a/x.txt')],
+        destDir: '/a',
+        onConflict: (_, __) async => ConflictChoice.overwrite,
+      );
+      expect(res.skipped, 1);
+      expect(res.succeeded, 0);
+      expect(patches(adapter), isEmpty);
     });
 
     test('returning null from the resolver aborts the remainder', () async {

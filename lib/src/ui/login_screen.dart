@@ -159,3 +159,29 @@ class LockScreen extends StatelessWidget {
     );
   }
 }
+
+/// Shown after login when the server exposes several sources and none is
+/// remembered: a simple list to pick the one to browse. The choice is persisted
+/// (see [AuthController.selectSource]) and restored on later launches.
+class SourceSelectScreen extends StatelessWidget {
+  const SourceSelectScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = context.watch<AuthController>();
+    final sources = auth.availableSources;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Choose a source')),
+      body: ListView.separated(
+        itemCount: sources.length,
+        separatorBuilder: (_, __) => const Divider(height: 1),
+        itemBuilder: (_, i) => ListTile(
+          leading: const Icon(Icons.storage_outlined),
+          title: Text(sources[i]),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => context.read<AuthController>().selectSource(sources[i]),
+        ),
+      ),
+    );
+  }
+}

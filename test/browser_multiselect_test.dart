@@ -15,7 +15,8 @@ import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'support/mock_adapter.dart';
 
 class _FakeAuth extends AuthController {
-  _FakeAuth(this._client, this._user);
+  _FakeAuth(this._client, this._user, PreferencesStore prefs)
+      : super(prefs: prefs);
   final FileBrowserClient _client;
   final FbUser _user;
   @override
@@ -56,8 +57,8 @@ void main() {
     final client = FileBrowserClient(
         baseUrl: 'https://demo.example.com', adapter: adapter)
       ..adoptToken('tok');
-    final auth = _FakeAuth(
-        client, FbUser(username: 'u', canCreate: true, canModify: canModify));
+    final auth = _FakeAuth(client,
+        FbUser(username: 'u', canCreate: true, canModify: canModify), prefs);
     await tester.pumpWidget(MultiProvider(
       providers: [
         Provider<PreferencesStore>.value(value: prefs),
@@ -140,7 +141,8 @@ void main() {
 
     final patches = adapter.requests.where((r) => r.method == 'PATCH').toList();
     expect(patches.length, 1);
-    expect(patches.single.uri.query, contains('action=rename'));
+    // The rename action travels in the JSON body, not the query string.
+    expect(patches.single.data, contains('"action":"rename"'));
     // Selection mode is dismissed once rename runs.
     expect(find.text('1 selected'), findsNothing);
   });

@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast PR gate: static analysis + unit/widget tests. No server needed.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.4
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test --exclude-tags integration  # integration is skip-by-default too
+
+  # End-to-end: run the integration-tagged API tests against a real quantum
+  # server (the official v1.4.0-stable release).
+  integration:
+    runs-on: ubuntu-latest
+    env:
+      FB_TEST_URL: http://localhost:8080
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.4
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Start quantum test server
+        run: |
+          mkdir -p .quantum-test
+          ./tool/serve.sh run > .quantum-test/serve.log 2>&1 &
+          echo "$!" > .quantum-test/serve.pid
+
+      - name: Wait for server ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null "$FB_TEST_URL/" 2>/dev/null; then
+              echo "server ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not come up"; cat .quantum-test/serve.log; exit 1
+
+      - name: Run integration tests
+        run: flutter test --tags integration --run-skipped
+
+      - name: Stop quantum test server
+        if: always()
+        run: kill "$(cat .quantum-test/serve.pid)" 2>/dev/null || true

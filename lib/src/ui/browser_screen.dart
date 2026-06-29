@@ -51,7 +51,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   // diagnosis note above [build].
   final ScrollController _scrollController = ScrollController();
 
-  // --- M3 multiselect --------------------------------------------------------
+  // --- multiselect -----------------------------------------------------------
   // Selection state is factored into [SelectionController] (tracked by path so
   // it survives re-sorts/rebuilds). Tap/long-press funnel through
   // [_handleTap]/[_handleLongPress] and intercept when the mode is armed.
@@ -178,7 +178,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   /// Opens search scoped to the current directory and dispatches the picked hit
   /// through the browser's own flows (navigate / view / actions), so all of the
   /// viewer/action wiring stays in one place. Result paths from the server are
-  /// relative to [_path]; [SearchScreen] resolves them to absolute paths.
+  /// relative to the source root; [SearchScreen] resolves them to absolute paths.
   Future<void> _openSearch() async {
     final pick = await Navigator.of(context).push<SearchPick>(
       MaterialPageRoute(
@@ -232,7 +232,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   // --- item activation -------------------------------------------------------
-  // Single tap/long-press funnels (the M3 selection seam): when selection mode
+  // Single tap/long-press funnels (the selection seam): when selection mode
   // lands, intercept here to toggle selection instead of activating the item.
 
   void _handleTap(FbResource item, List<FbResource> all) {
@@ -1283,10 +1283,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
 /// The directory listing as a gallery grid.
 ///
-/// Extracted from [BrowserScreen] so future milestones can extend it cleanly:
-/// M3 (multiselect) adds a `selectedPaths` set + selection chrome here, and M5
-/// (IO) can surface per-tile transfer progress — all without touching the
-/// screen's navigation/sort/error wiring. Tap and long-press are reported per
+/// Extracted from [BrowserScreen] so it can be extended cleanly: multiselect
+/// adds a `selectedPaths` set + selection chrome here, and transfers can surface
+/// per-tile progress — all without touching the screen's navigation/sort/error
+/// wiring. Tap and long-press are reported per
 /// item via callbacks; the parent decides what they mean (activate vs. select).
 ///
 /// Takes the parent's retained [controller] so scroll offset survives rebuilds
