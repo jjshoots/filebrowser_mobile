@@ -42,7 +42,7 @@ dependencies:
 
   # System share-sheet for the public share-link URL (text-only, so no
   # FileProvider / native file-sharing configuration is required).
-  share_plus: ^10.0.0
+  share_plus: ^12.0.2
 
   # Typed, non-secret UI preferences (sort order, …)
   shared_preferences: ^2.3.0
