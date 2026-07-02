@@ -29,7 +29,7 @@ dependencies:
   local_auth: ^2.3.0
 
   # Background upload/download with a native foreground service + notifications
-  background_downloader: ^8.5.0
+  background_downloader: ^9.5.5
 
   # Simple state management / DI
   provider: ^6.1.2
