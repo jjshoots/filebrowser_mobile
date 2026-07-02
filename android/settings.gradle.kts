@@ -22,7 +22,7 @@ plugins {
     // Pinned to AGP 8.x: AGP 9 enforces "Built-in Kotlin", which breaks plugins
     // that still apply the Kotlin Gradle Plugin (background_downloader, file_picker).
     id("com.android.application") version "8.11.1" apply false
-    id("org.jetbrains.kotlin.android") version "2.1.20" apply false
+    id("org.jetbrains.kotlin.android") version "2.4.0" apply false
 }
 
 include(":app")
