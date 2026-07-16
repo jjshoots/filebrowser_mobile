@@ -23,7 +23,7 @@ plugins {
     // still breaks plugins that apply the Kotlin Gradle Plugin themselves
     // (share_plus, flutter_secure_storage; see plus_plugins#3745 and
     // flutter/flutter#187042). share_plus 12 requires AGP >= 8.12.1.
-    id("com.android.application") version "8.13.2" apply false
+    id("com.android.application") version "9.3.0" apply false
     id("org.jetbrains.kotlin.android") version "2.4.0" apply false
 }
 
