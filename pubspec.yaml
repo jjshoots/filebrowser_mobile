@@ -20,13 +20,13 @@ dependencies:
   cached_network_image: ^3.4.0
   photo_view: ^0.15.0
   video_player: ^2.9.0
-  chewie: ^1.8.0
+  chewie: ^1.14.1
 
   # Secure credential storage (Android Keystore / EncryptedSharedPreferences)
-  flutter_secure_storage: ^10.3.1
+  flutter_secure_storage: ^11.0.0
 
   # Biometric / device-credential authentication
-  local_auth: ^2.3.0
+  local_auth: ^3.0.2
 
   # Background upload/download with a native foreground service + notifications
   background_downloader: ^9.5.5
@@ -35,7 +35,7 @@ dependencies:
   provider: ^6.1.2
 
   # File picking for uploads, and SAF directory picking for download targets
-  file_picker: ^11.0.0
+  file_picker: ^12.0.0-beta.7
 
   # Hand a downloaded file off to a native Android app (PDF/text/audio/…)
   open_filex: ^4.7.0
@@ -43,7 +43,7 @@ dependencies:
   # System share-sheet: share-link URLs as text, and "send a copy" of files
   # fetched to the app cache (the plugin ships its own Android FileProvider,
   # so no manifest configuration is required).
-  share_plus: ^12.0.2
+  share_plus: ^13.3.0
 
   # Typed, non-secret UI preferences (sort order, …)
   shared_preferences: ^2.3.0
